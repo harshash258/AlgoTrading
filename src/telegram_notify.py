@@ -221,6 +221,11 @@ def main():
     # Always print to console (useful in GitHub Actions logs)
     print("\n" + message.replace("<b>", "").replace("</b>", "") + "\n")
 
+    # Skip Telegram send on weekends — no point notifying, markets closed
+    if "Weekend" in message:
+        print("Weekend — skipping Telegram notification.")
+        sys.exit(0)
+
     print("Sending to Telegram...")
     success = send_telegram(message, token, chat_id)
 
