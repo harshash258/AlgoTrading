@@ -68,18 +68,80 @@ STRIKE_STEPS = {
 
 
 # ─────────────────────────────────────────────────────────────────
+# Source strategy label helper
+# ─────────────────────────────────────────────────────────────────
+
+def _has_conflict(sigs: list) -> bool:
+    """Return True if the signal list contains both CE and PE entries."""
+    types = {s.option_type for s in sigs}
+    return "CE" in types and "PE" in types
+
+
+def _source_label(sig) -> str:
+    """Return a short human-readable source strategy label."""
+    source = sig.meta.get("source_strategy", "")
+    if "rsi" in source:
+        return f"RSI {config.RSI_OVERSOLD}/{config.RSI_OVERBOUGHT}"
+    if "trend" in source or "ma" in source.lower():
+        return f"MA {config.TREND_FAST_MA}/{config.TREND_SLOW_MA}"
+    return source or "combined"
+
+
+def _trigger_label(sig) -> str:
+    """Return the trigger description for a signal."""
+    source = sig.meta.get("source_strategy", "")
+    if "rsi" in source:
+        rsi_val = sig.meta.get("rsi", "")
+        return f"RSI reversal ({rsi_val})"
+    return "MA crossover"
+
+
+# ─────────────────────────────────────────────────────────────────
+# Format one signal block (preserves existing per-signal format)
+# ─────────────────────────────────────────────────────────────────
+
+def _format_signal_block(sig, spot: float, vix: float, atm: int,
+                          name: str, ticker: str,
+                          show_source: bool = False) -> str:
+    action     = "BUY CE" if sig.option_type == "CE" else "BUY PE"
+    expiry_str = sig.expiry.strftime("%d %b") if sig.expiry else "weekly"
+    risk_amt   = config.STARTING_CAPITAL * config.RISK_PER_TRADE_PCT / 100
+    lots_hint  = config.LOT_SIZES.get(ticker, config.DEFAULT_LOT_SIZE)
+
+    source_line = f"  (source: {_source_label(sig)})\n" if show_source else ""
+
+    return (
+        f"<b>{action} {name}</b>\n"
+        f"{source_line}"
+        f"  Strike  : {atm} {sig.option_type}\n"
+        f"  Expiry  : {expiry_str}\n"
+        f"  Spot    : {spot:,.0f}  |  VIX: {vix:.1f}%\n"
+        f"  Trigger : {_trigger_label(sig)}\n"
+        f"  SL      : -{config.BUY_STOP_LOSS_PCT:.0f}% of premium\n"
+        f"  Target  : +{config.BUY_TARGET_PCT:.0f}% of premium\n"
+        f"  Risk    : Rs{risk_amt:,.0f} ({config.RISK_PER_TRADE_PCT}% capital)\n"
+        f"  Lot size: {lots_hint}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
 # Generate signals and format message
 # ─────────────────────────────────────────────────────────────────
 
 def generate_signal_message() -> str:
     """
-    Run the combined strategy on today's data and return a
-    formatted Telegram message string.
+    Run the combined strategy on today's data and return a formatted
+    Telegram message with conflict detection and grouping.
+
+    - Signals grouped by underlying
+    - Conflicts (CE + PE on same underlying) sorted to the top
+    - Source strategy shown per signal when conflict exists
+    - No-conflict days look identical to the original format
     """
     today = date.today()
     start = today - timedelta(days=400)  # enough history for MA 75
 
-    # Skip weekends — markets closed
+    # Skip weekends
     if today.weekday() >= 5:
         return (
             f"<b>NSE Options Signals — {today.strftime('%d %b %Y')}</b>\n\n"
@@ -96,12 +158,14 @@ def generate_signal_message() -> str:
     if not data:
         return "<b>Signal generation failed</b>\nNo market data available."
 
-    # Verify data is fresh — warn if most recent candle is not today
+    # Staleness check
     stale_warning = ""
     for ticker, df in data.items():
-        latest = df.index.max().date()
-        if latest < today:
-            stale_warning = f"\n<b>WARNING:</b> Data for {ticker} is from {latest}, not today. Signal may be 1 day old."
+        if df.index.max().date() < today:
+            stale_warning = (
+                f"\n<b>WARNING:</b> Data for {ticker} is from "
+                f"{df.index.max().date()}, not today. Signal may be 1 day old."
+            )
             break
 
     # Build strategy
@@ -124,7 +188,9 @@ def generate_signal_message() -> str:
         ),
     ])
 
-    signal_blocks = []
+    # ── Collect all entry signals grouped by ticker ───────────────
+    # grouped: { ticker: { spot, vix, atm, name, sigs: [Signal, ...] } }
+    grouped: dict = {}
 
     for ticker, df in data.items():
         df.attrs["ticker"] = ticker
@@ -134,7 +200,6 @@ def generate_signal_message() -> str:
 
         sigs = strategy.generate_signals(df, vix_series, today)
         entry_sigs = [s for s in sigs if s.signal_type == "entry"]
-
         if not entry_sigs:
             continue
 
@@ -142,55 +207,73 @@ def generate_signal_message() -> str:
         vix  = float(df["VIX"].iloc[-1]) if "VIX" in df.columns else 0.0
         step = STRIKE_STEPS.get(ticker, 50)
         atm  = round(spot / step) * step
-        name = TICKER_NAMES.get(ticker, ticker)
 
-        for sig in entry_sigs:
-            action     = "BUY CE" if sig.option_type == "CE" else "BUY PE"
-            expiry_str = sig.expiry.strftime("%d %b") if sig.expiry else "weekly"
+        grouped[ticker] = {
+            "spot": spot,
+            "vix" : vix,
+            "atm" : atm,
+            "name": TICKER_NAMES.get(ticker, ticker),
+            "sigs": entry_sigs,
+        }
 
-            # Estimate premium context from meta if available
-            source = sig.meta.get("source_strategy", "")
-            if "rsi" in source:
-                rsi_val = sig.meta.get("rsi", "")
-                trigger = f"RSI reversal ({rsi_val})"
-            else:
-                trigger = "MA crossover"
+    # ── Detect conflicts per ticker ───────────────────────────────
+    # conflict = same underlying has both CE and PE entry signals
+    conflict_tickers = [t for t, g in grouped.items() if _has_conflict(g["sigs"])]
+    clean_tickers    = [t for t in grouped if t not in conflict_tickers]
 
-            # Position sizing hint
-            risk_amt   = config.STARTING_CAPITAL * config.RISK_PER_TRADE_PCT / 100
-            lots_hint  = config.LOT_SIZES.get(ticker, config.DEFAULT_LOT_SIZE)
+    # ── Build output blocks — conflicts first ─────────────────────
+    section_blocks = []
 
-            block = (
-                f"<b>{action} {name}</b>\n"
-                f"  Strike  : {atm} {sig.option_type}\n"
-                f"  Expiry  : {expiry_str}\n"
-                f"  Spot    : {spot:,.0f}  |  VIX: {vix:.1f}%\n"
-                f"  Trigger : {trigger}\n"
-                f"  SL      : -{config.BUY_STOP_LOSS_PCT:.0f}% of premium\n"
-                f"  Target  : +{config.BUY_TARGET_PCT:.0f}% of premium\n"
-                f"  Risk    : Rs{risk_amt:,.0f} ({config.RISK_PER_TRADE_PCT}% capital)\n"
-                f"  Lot size: {lots_hint}"
+    for ticker in conflict_tickers + clean_tickers:
+        g       = grouped[ticker]
+        sigs    = g["sigs"]
+        name    = g["name"]
+        is_conf = ticker in conflict_tickers
+
+        # Conflict header
+        if is_conf:
+            heading = f"<b>CONFLICT — {name}</b>"
+        else:
+            heading = None  # no extra heading for clean signals
+
+        # Format each signal in this group
+        # Show source always when there's a conflict; hide it when clean
+        sig_lines = []
+        for sig in sigs:
+            block = _format_signal_block(
+                sig, g["spot"], g["vix"], g["atm"],
+                name, ticker,
+                show_source=is_conf,
             )
-            signal_blocks.append(block)
+            sig_lines.append(block)
 
-    tomorrow = today + timedelta(days=1)
-    # Skip to Monday if tomorrow is weekend
-    if tomorrow.weekday() == 5:
-        tomorrow += timedelta(days=2)
-    elif tomorrow.weekday() == 6:
-        tomorrow += timedelta(days=1)
+        divider = "─" * 32
 
+        if is_conf:
+            group_block = (
+                f"{divider}\n"
+                f"{heading}\n"
+                f"{divider}\n"
+                + "\n\n".join(sig_lines)
+            )
+        else:
+            group_block = "\n\n".join(sig_lines)
+
+        section_blocks.append(group_block)
+
+    # ── Assemble final message ────────────────────────────────────
     header = (
         f"<b>NSE Options Signals</b>\n"
         f"Date    : {today.strftime('%d %b %Y')} (execute tomorrow)\n"
-        f"Strategy: MA {config.TREND_FAST_MA}/{config.TREND_SLOW_MA} + RSI {config.RSI_OVERSOLD}/{config.RSI_OVERBOUGHT}\n"
+        f"Strategy: MA {config.TREND_FAST_MA}/{config.TREND_SLOW_MA}"
+        f" + RSI {config.RSI_OVERSOLD}/{config.RSI_OVERBOUGHT}\n"
         f"{'─' * 32}"
     )
 
-    if not signal_blocks:
+    if not section_blocks:
         body = "\nNo signals today. Stay out of the market."
     else:
-        body = "\n\n" + "\n\n".join(signal_blocks)
+        body = "\n\n" + "\n\n".join(section_blocks)
 
     footer = (
         f"\n{'─' * 32}\n"
