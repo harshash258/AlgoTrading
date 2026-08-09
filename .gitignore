@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Data — large files, never commit
+data/bhavcopy/
+data/cache/
+data/raw/
+data/options/
+
+# Reports — generated output, not source
+reports/
+
+# Signals
+signals/
+
+# Secrets / env
+.env
+*.env
+secrets.py
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

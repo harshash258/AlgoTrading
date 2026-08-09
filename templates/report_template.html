@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Backtest Report — {{ strategy_name }}</title>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <style>
+    :root {
+      --bg:        #0f1117;
+      --surface:   #1a1d27;
+      --border:    #2d3148;
+      --text:      #e8eaf0;
+      --muted:     #8890a8;
+      --green:     #27ae60;
+      --red:       #e74c3c;
+      --yellow:    #f39c12;
+      --blue:      #3498db;
+      --card-bg:   #1e2132;
+    }
+    [data-theme="light"] {
+      --bg:        #f4f6fb;
+      --surface:   #ffffff;
+      --border:    #dde2f0;
+      --text:      #1a1d27;
+      --muted:     #6b748a;
+      --card-bg:   #ffffff;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    /* ── Header ── */
+    .header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 20px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header h1 { font-size: 1.4rem; font-weight: 600; }
+    .header .meta { color: var(--muted); font-size: 0.85rem; }
+    .theme-toggle {
+      background: var(--border);
+      border: none;
+      color: var(--text);
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    /* ── Layout ── */
+    .container { max-width: 1400px; margin: 0 auto; padding: 24px 32px; }
+    .section { margin-bottom: 32px; }
+    .section-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 14px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    /* ── Metric cards ── */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 12px;
+    }
+    .metric-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .metric-card .label {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+    .metric-card .value {
+      font-size: 1.3rem;
+      font-weight: 700;
+    }
+    .positive { color: var(--green); }
+    .negative { color: var(--red); }
+    .neutral  { color: var(--text); }
+    /* ── Capital summary bar ── */
+    .capital-bar {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      display: flex;
+      gap: 40px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .capital-bar .item .lbl { font-size: 0.75rem; color: var(--muted); }
+    .capital-bar .item .val { font-size: 1.1rem; font-weight: 600; }
+    /* ── Charts ── */
+    .chart-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    .chart-box {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 4px;
+    }
+    .chart-full {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 4px;
+    }
+    /* ── Trade table ── */
+    .table-controls {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .table-controls input {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 7px 12px;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      width: 260px;
+    }
+    .table-controls .page-info { color: var(--muted); font-size: 0.85rem; margin-left: auto; }
+    .btn {
+      background: var(--border);
+      border: none;
+      color: var(--text);
+      padding: 7px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .btn:hover { background: var(--blue); }
+    .table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid var(--border); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+      min-width: 900px;
+    }
+    thead th {
+      background: var(--surface);
+      padding: 10px 12px;
+      text-align: left;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.72rem;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+    thead th:hover { color: var(--text); }
+    tbody tr { border-top: 1px solid var(--border); }
+    tbody tr:hover { background: var(--surface); }
+    tbody td { padding: 9px 12px; white-space: nowrap; }
+    .win-row td:first-child { border-left: 3px solid var(--green); }
+    .loss-row td:first-child { border-left: 3px solid var(--red); }
+    /* ── Params panel ── */
+    .params-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 10px;
+    }
+    .param-item {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .param-item .pkey { color: var(--muted); font-size: 0.8rem; }
+    .param-item .pval { font-weight: 600; font-size: 0.85rem; }
+    /* ── Signals table ── */
+    .signal-buy  { background: rgba(39,174,96,0.12); }
+    .signal-sell { background: rgba(231,76,60,0.12); }
+    .signal-exit { background: rgba(52,152,219,0.12); }
+    /* ── Footer ── */
+    .footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.78rem;
+      padding: 24px 0 32px;
+      border-top: 1px solid var(--border);
+      margin-top: 32px;
+    }
+    @media (max-width: 768px) {
+      .chart-row { grid-template-columns: 1fr; }
+      .container { padding: 16px; }
+      .header { flex-direction: column; gap: 12px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── HEADER ─────────────────────────────────────────────── -->
+<div class="header">
+  <div>
+    <h1>📊 {{ strategy_name | upper }} — Backtest Report</h1>
+    <div class="meta">
+      {{ underlyings }} &nbsp;·&nbsp;
+      {{ backtest_start }} → {{ backtest_end }} &nbsp;·&nbsp;
+      Generated {{ generated_at }}
+    </div>
+  </div>
+  <button class="theme-toggle" onclick="toggleTheme()">☀ Light / 🌙 Dark</button>
+</div>
+
+<div class="container">
+
+  <!-- ── CAPITAL SUMMARY ──────────────────────────────────── -->
+  <div class="section">
+    <div class="capital-bar">
+      <div class="item">
+        <div class="lbl">Starting Capital</div>
+        <div class="val">₹{{ "{:,.0f}".format(metrics.starting_capital) }}</div>
+      </div>
+      <div class="item">
+        <div class="lbl">Final Capital</div>
+        <div class="val">₹{{ "{:,.0f}".format(metrics.final_capital) }}</div>
+      </div>
+      <div class="item">
+        <div class="lbl">Net P&amp;L</div>
+        <div class="val {{ 'positive' if metrics.net_pnl >= 0 else 'negative' }}">
+          ₹{{ "{:+,.0f}".format(metrics.net_pnl) }}
+        </div>
+      </div>
+      <div class="item">
+        <div class="lbl">Total Return</div>
+        <div class="val {{ 'positive' if metrics.total_return_pct >= 0 else 'negative' }}">
+          {{ "{:+.2f}".format(metrics.total_return_pct) }}%
+        </div>
+      </div>
+      <div class="item">
+        <div class="lbl">CAGR</div>
+        <div class="val {{ 'positive' if metrics.cagr_pct >= 0 else 'negative' }}">
+          {{ "{:+.2f}".format(metrics.cagr_pct) }}%
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── METRICS GRID ─────────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title">Performance Metrics</div>
+    <div class="metrics-grid">
+      {% set cards = [
+        ("Total Trades",    metrics.total_trades,         "neutral"),
+        ("Win Rate",        metrics.win_rate_pct|string + "%", "positive" if metrics.win_rate_pct >= 50 else "negative"),
+        ("Total Return",    "{:+.2f}%".format(metrics.total_return_pct), "positive" if metrics.total_return_pct >= 0 else "negative"),
+        ("CAGR",            "{:+.2f}%".format(metrics.cagr_pct), "positive" if metrics.cagr_pct >= 0 else "negative"),
+        ("Avg Trade",       "{:+.2f}%".format(metrics.avg_trade_pct), "positive" if metrics.avg_trade_pct >= 0 else "negative"),
+        ("Median Trade",    "{:+.2f}%".format(metrics.median_trade_pct), "positive" if metrics.median_trade_pct >= 0 else "negative"),
+        ("Best Trade",      "{:+.2f}%".format(metrics.best_trade_pct), "positive"),
+        ("Worst Trade",     "{:+.2f}%".format(metrics.worst_trade_pct), "negative"),
+        ("Avg Win",         "{:+.2f}%".format(metrics.avg_win_pct), "positive"),
+        ("Avg Loss",        "{:+.2f}%".format(metrics.avg_loss_pct), "negative"),
+        ("Profit Factor",   metrics.profit_factor, "positive" if metrics.profit_factor >= 1 else "negative"),
+        ("Sharpe/Trade",    metrics.sharpe_per_trade, "positive" if metrics.sharpe_per_trade >= 0 else "negative"),
+        ("Sortino/Trade",   metrics.sortino_per_trade, "positive" if metrics.sortino_per_trade >= 0 else "negative"),
+        ("Max Drawdown",    "{:.2f}%".format(metrics.max_drawdown_pct), "negative" if metrics.max_drawdown_pct > 10 else "neutral"),
+        ("Avg Held Days",   metrics.avg_held_days, "neutral"),
+        ("Wins / Losses",   "{}W / {}L".format(metrics.total_wins, metrics.total_losses), "neutral"),
+        ("Avg Entry Delta", metrics.avg_entry_delta, "neutral"),
+        ("Theta %/day",     "{:.3f}%".format(metrics.avg_theta_pct), "negative" if metrics.avg_theta_pct < -0.5 else "neutral"),
+      ] %}
+      {% for label, value, cls in cards %}
+      <div class="metric-card">
+        <div class="label">{{ label }}</div>
+        <div class="value {{ cls }}">{{ value }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- ── EQUITY CURVE ─────────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title">Equity Curve</div>
+    <div class="chart-full">
+      <div id="equity-chart"></div>
+    </div>
+  </div>
+
+  <!-- ── HEATMAP + HISTOGRAM ──────────────────────────────── -->
+  <div class="section">
+    <div class="chart-row">
+      <div>
+        <div class="section-title">Monthly Returns Heatmap</div>
+        <div class="chart-box"><div id="heatmap-chart"></div></div>
+      </div>
+      <div>
+        <div class="section-title">Return Distribution</div>
+        <div class="chart-box"><div id="histogram-chart"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── P&L BAR CHART ────────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title">Trade P&amp;L Over Time</div>
+    <div class="chart-full">
+      <div id="bar-chart"></div>
+    </div>
+  </div>
+
+  <!-- ── TRADE LOG TABLE ──────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title">Trade Log</div>
+    <div class="table-controls">
+      <input type="text" id="search-box" placeholder="Search underlying, date, exit reason…" oninput="filterTable()" />
+      <button class="btn" onclick="exportCSV()">⬇ Export CSV</button>
+      <button class="btn" onclick="prevPage()">← Prev</button>
+      <button class="btn" onclick="nextPage()">Next →</button>
+      <span class="page-info" id="page-info"></span>
+    </div>
+    <div class="table-wrap">
+      <table id="trade-table">
+        <thead>
+          <tr>
+            <th onclick="sortTable(0)">#</th>
+            <th onclick="sortTable(1)">Entry</th>
+            <th onclick="sortTable(2)">Exit</th>
+            <th onclick="sortTable(3)">Underlying</th>
+            <th onclick="sortTable(4)">Type</th>
+            <th onclick="sortTable(5)">Direction</th>
+            <th onclick="sortTable(6)">Strike</th>
+            <th onclick="sortTable(7)">Expiry</th>
+            <th onclick="sortTable(8)">Entry ₹</th>
+            <th onclick="sortTable(9)">Exit ₹</th>
+            <th onclick="sortTable(10)">Lots</th>
+            <th onclick="sortTable(11)">P&amp;L ₹</th>
+            <th onclick="sortTable(12)">P&amp;L %</th>
+            <th onclick="sortTable(13)">Days</th>
+            <th onclick="sortTable(14)">Exit Reason</th>
+            <th onclick="sortTable(15)">IV %</th>
+          </tr>
+        </thead>
+        <tbody id="trade-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ── SIGNALS SECTION ──────────────────────────────────── -->
+  {% if signals %}
+  <div class="section">
+    <div class="section-title">Today's Signals</div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Action</th><th>Underlying</th><th>Type</th><th>Strike</th>
+            <th>Expiry</th><th>Entry Range</th><th>Stop Loss</th><th>Target</th>
+            <th>Lots</th><th>Capital Req.</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for sig in signals %}
+          <tr class="signal-{{ sig.action | lower }}">
+            <td><strong>{{ sig.action }}</strong></td>
+            <td>{{ sig.underlying }}</td>
+            <td>{{ sig.option_type }}</td>
+            <td>{{ sig.strike }}</td>
+            <td>{{ sig.expiry }}</td>
+            <td>{{ sig.entry_range }}</td>
+            <td>{{ sig.stop_loss }}</td>
+            <td>{{ sig.target }}</td>
+            <td>{{ sig.lots }}</td>
+            <td>₹{{ sig.capital_required }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- ── STRATEGY PARAMS ──────────────────────────────────── -->
+  <div class="section">
+    <div class="section-title">Strategy Parameters</div>
+    <div class="params-grid">
+      {% for key, value in strategy_params.items() %}
+      <div class="param-item">
+        <span class="pkey">{{ key | replace("_", " ") | title }}</span>
+        <span class="pval">{{ value }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+<div class="footer">
+  Generated by Algo Trading System &nbsp;·&nbsp; {{ generated_at }}
+  &nbsp;·&nbsp; Results are indicative. Not financial advice.
+</div>
+
+<!-- ── SCRIPTS ──────────────────────────────────────────────── -->
+<script>
+  // ── Theme toggle
+  function toggleTheme() {
+    const html = document.documentElement;
+    html.setAttribute("data-theme", html.getAttribute("data-theme") === "dark" ? "light" : "dark");
+  }
+
+  // ── Render Plotly charts
+  const equityData    = {{ equity_chart | safe }};
+  const heatmapData   = {{ heatmap_chart | safe }};
+  const histogramData = {{ histogram_chart | safe }};
+  const barData       = {{ bar_chart | safe }};
+
+  if (equityData.data)    Plotly.newPlot("equity-chart",    equityData.data,    equityData.layout,    {responsive:true});
+  if (heatmapData.data)   Plotly.newPlot("heatmap-chart",   heatmapData.data,   heatmapData.layout,   {responsive:true});
+  if (histogramData.data) Plotly.newPlot("histogram-chart", histogramData.data, histogramData.layout, {responsive:true});
+  if (barData.data)       Plotly.newPlot("bar-chart",       barData.data,       barData.layout,       {responsive:true});
+
+  // ── Trade table with pagination + search + sort
+  const RAW_TRADES  = {{ trades_json | safe }};
+  const PER_PAGE    = {{ rows_per_page }};
+  let filteredTrades = [...RAW_TRADES];
+  let currentPage    = 1;
+  let sortCol        = 0;
+  let sortAsc        = true;
+
+  function renderTable() {
+    const tbody  = document.getElementById("trade-tbody");
+    const start  = (currentPage - 1) * PER_PAGE;
+    const end    = start + PER_PAGE;
+    const rows   = filteredTrades.slice(start, end);
+
+    tbody.innerHTML = rows.map(t => {
+      const win = (t["P&L %"] || 0) > 0;
+      const cls = win ? "win-row" : "loss-row";
+      const pnlCls = win ? "positive" : "negative";
+      return `<tr class="${cls}">
+        <td>${t["#"]}</td>
+        <td>${(t["Entry Date"]||"").slice(0,10)}</td>
+        <td>${(t["Exit Date"]||"").slice(0,10)}</td>
+        <td>${t["Underlying"]}</td>
+        <td>${t["Type"]}</td>
+        <td>${t["Direction"]}</td>
+        <td>${t["Strike"]}</td>
+        <td>${(t["Expiry"]||"").slice(0,10)}</td>
+        <td>₹${(t["Entry Premium"]||0).toFixed(2)}</td>
+        <td>₹${(t["Exit Premium"]||0).toFixed(2)}</td>
+        <td>${t["Lots"]}</td>
+        <td class="${pnlCls}">₹${(t["P&L ₹"]||0).toLocaleString("en-IN",{minimumFractionDigits:0})}</td>
+        <td class="${pnlCls}">${(t["P&L %"]||0) >= 0 ? "+" : ""}${(t["P&L %"]||0).toFixed(2)}%</td>
+        <td>${t["Held Days"]}</td>
+        <td>${t["Exit Reason"]}</td>
+        <td>${t["Entry IV %"]}</td>
+      </tr>`;
+    }).join("");
+
+    document.getElementById("page-info").textContent =
+      `Page ${currentPage} of ${Math.max(1, Math.ceil(filteredTrades.length / PER_PAGE))} (${filteredTrades.length} trades)`;
+  }
+
+  function filterTable() {
+    const q = document.getElementById("search-box").value.toLowerCase();
+    filteredTrades = RAW_TRADES.filter(t =>
+      Object.values(t).some(v => String(v).toLowerCase().includes(q))
+    );
+    currentPage = 1;
+    renderTable();
+  }
+
+  function nextPage() {
+    if (currentPage < Math.ceil(filteredTrades.length / PER_PAGE)) {
+      currentPage++;
+      renderTable();
+    }
+  }
+
+  function prevPage() {
+    if (currentPage > 1) { currentPage--; renderTable(); }
+  }
+
+  function sortTable(col) {
+    const keys = ["#","Entry Date","Exit Date","Underlying","Type","Direction",
+                  "Strike","Expiry","Entry Premium","Exit Premium","Lots",
+                  "P&L ₹","P&L %","Held Days","Exit Reason","Entry IV %"];
+    const key = keys[col];
+    if (sortCol === col) sortAsc = !sortAsc;
+    else { sortCol = col; sortAsc = true; }
+    filteredTrades.sort((a, b) => {
+      const av = a[key], bv = b[key];
+      if (av === bv) return 0;
+      const cmp = av < bv ? -1 : 1;
+      return sortAsc ? cmp : -cmp;
+    });
+    currentPage = 1;
+    renderTable();
+  }
+
+  function exportCSV() {
+    const keys = Object.keys(RAW_TRADES[0] || {});
+    const csv  = [keys.join(","),
+      ...RAW_TRADES.map(r => keys.map(k => JSON.stringify(r[k] ?? "")).join(","))
+    ].join("\n");
+    const a = document.createElement("a");
+    a.href = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
+    a.download = "trades_{{ strategy_name }}.csv";
+    a.click();
+  }
+
+  renderTable();
+</script>
+</body>
+</html>
