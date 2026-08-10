@@ -163,7 +163,7 @@ def generate_signal_message() -> str:
     if not data:
         return "<b>Signal generation failed</b>\nNo market data available."
 
-    # Staleness check
+    # Staleness / VIX fallback warnings
     stale_warning = ""
     for ticker, df in data.items():
         if df.index.max().date() < today:
@@ -172,6 +172,19 @@ def generate_signal_message() -> str:
                 f"{df.index.max().date()}, not today. Signal may be 1 day old."
             )
             break
+
+    # Detect VIX fallback: all VIX values identical across the last 30 rows
+    # means the constant fallback was used (no real ^INDIAVIX data available).
+    from src.data_ingestion import _VIX_FALLBACK
+    first_df = next(iter(data.values()))
+    if "VIX" in first_df.columns:
+        recent_vix = first_df["VIX"].dropna().tail(30)
+        if len(recent_vix) > 1 and recent_vix.nunique() == 1:
+            stale_warning += (
+                f"\n<b>WARNING:</b> India VIX unavailable from Yahoo Finance. "
+                f"Using fallback IV = {_VIX_FALLBACK}%. "
+                f"Options pricing is approximate today."
+            )
 
     # Build strategy
     strategy = CombinedStrategy([

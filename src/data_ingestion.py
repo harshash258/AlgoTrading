@@ -7,6 +7,7 @@ to avoid redundant downloads on subsequent runs.
 
 import os
 import logging
+import time
 from datetime import date, timedelta
 
 import pandas as pd
@@ -17,6 +18,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 
 logger = logging.getLogger(__name__)
+
+# Default VIX fallback used when ^INDIAVIX is completely unavailable
+_VIX_FALLBACK = 15.0
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -125,30 +129,41 @@ def fetch_ohlcv(
 
 
 def _download(ticker: str, start: date, end: date) -> pd.DataFrame | None:
-    """Raw yfinance download, returns clean OHLCV DataFrame."""
-    try:
-        raw = yf.download(
-            ticker,
-            start=start.isoformat(),
-            end=(end + timedelta(days=1)).isoformat(),  # yf end is exclusive
-            progress=False,
-            auto_adjust=True,
-        )
-        if raw.empty:
-            logger.warning(f"yfinance returned empty data for {ticker}")
-            return None
+    """Raw yfinance download with up to 3 retries on failure."""
+    for attempt in range(1, 4):
+        try:
+            raw = yf.download(
+                ticker,
+                start=start.isoformat(),
+                end=(end + timedelta(days=1)).isoformat(),  # yf end is exclusive
+                progress=False,
+                auto_adjust=True,
+            )
+            if raw.empty:
+                logger.warning(
+                    f"yfinance returned empty data for {ticker} "
+                    f"(attempt {attempt}/3)"
+                )
+                if attempt < 3:
+                    time.sleep(5 * attempt)  # 5s, 10s back-off
+                    continue
+                return None
 
-        # Flatten MultiIndex columns if present (yfinance >= 0.2.x)
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.get_level_values(0)
+            # Flatten MultiIndex columns if present (yfinance >= 0.2.x)
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = raw.columns.get_level_values(0)
 
-        df = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
-        df.index = pd.to_datetime(df.index)
-        df.dropna(subset=["Close"], inplace=True)
-        return df
-    except Exception as e:
-        logger.error(f"Failed to download {ticker}: {e}")
-        return None
+            df = raw[["Open", "High", "Low", "Close", "Volume"]].copy()
+            df.index = pd.to_datetime(df.index)
+            df.dropna(subset=["Close"], inplace=True)
+            return df
+
+        except Exception as e:
+            logger.error(f"Failed to download {ticker} (attempt {attempt}/3): {e}")
+            if attempt < 3:
+                time.sleep(5 * attempt)
+
+    return None
 
 
 def fetch_india_vix(
@@ -159,14 +174,34 @@ def fetch_india_vix(
     """
     Fetch India VIX data (^INDIAVIX from Yahoo Finance).
 
-    Returns DataFrame with column 'VIX' indexed by date.
+    Returns DataFrame with columns 'VIX' and 'VIX_decimal' indexed by date.
     VIX is used as implied volatility proxy for options pricing.
+
+    Fallback chain when ^INDIAVIX is unavailable:
+      1. Existing local cache (served as-is)
+      2. Constant _VIX_FALLBACK value (15.0) — signals still fire, just with
+         a fixed IV assumption. A warning is included in the Telegram message
+         via the staleness check in telegram_notify.py.
     """
-    df = fetch_ohlcv(config.INDIA_VIX_TICKER, start, end, force_refresh)
-    vix = df[["Close"]].rename(columns={"Close": "VIX"})
-    # VIX is expressed as annualised % — convert to decimal for B-S model
-    vix["VIX_decimal"] = vix["VIX"] / 100.0
-    return vix
+    try:
+        df = fetch_ohlcv(config.INDIA_VIX_TICKER, start, end, force_refresh)
+        vix = df[["Close"]].rename(columns={"Close": "VIX"})
+        vix["VIX_decimal"] = vix["VIX"] / 100.0
+        return vix
+    except Exception as e:
+        logger.warning(
+            f"Could not fetch India VIX ({e}). "
+            f"Using fallback VIX = {_VIX_FALLBACK}%. "
+            f"Signal generation will continue but options pricing is approximate."
+        )
+        # Build a constant-VIX DataFrame spanning the requested date range
+        # using business days so it aligns with the spot data index on join.
+        idx = pd.date_range(start=str(start), end=str(end), freq="B")
+        vix = pd.DataFrame(
+            {"VIX": _VIX_FALLBACK, "VIX_decimal": _VIX_FALLBACK / 100.0},
+            index=idx,
+        )
+        return vix
 
 
 def fetch_all_underlyings(
