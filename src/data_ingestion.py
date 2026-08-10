@@ -11,7 +11,6 @@ import time
 from datetime import date, timedelta
 
 import pandas as pd
-import requests
 import yfinance as yf
 
 import sys
@@ -22,19 +21,6 @@ logger = logging.getLogger(__name__)
 
 # Default VIX fallback used when ^INDIAVIX is completely unavailable
 _VIX_FALLBACK = 15.0
-
-# Spoof a browser User-Agent so Yahoo Finance doesn't block CI runner IPs.
-# A custom requests Session is passed to every yf.download() call.
-_SESSION = requests.Session()
-_SESSION.headers.update({
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-})
 
 # ─────────────────────────────────────────────────────────────────
 # Cache helpers
@@ -151,7 +137,6 @@ def _download(ticker: str, start: date, end: date) -> pd.DataFrame | None:
                 end=(end + timedelta(days=1)).isoformat(),  # yf end is exclusive
                 progress=False,
                 auto_adjust=True,
-                session=_SESSION,
             )
             if raw.empty:
                 logger.warning(
