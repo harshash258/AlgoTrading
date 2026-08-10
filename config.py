@@ -41,7 +41,7 @@ DAYS_BEFORE_EXPIRY_EXIT = 1
 LOT_SIZES = {
     "^NSEI":       25,    # Nifty 50
     "^NSEBANK":    15,    # Bank Nifty
-    "NIFTYFIN.NS": 40,    # Fin Nifty
+    "NIFTY_FIN_SERVICE.NS": 40,    # Fin Nifty
     "NIFTY":       25,
     "BANKNIFTY":   15,
     "FINNIFTY":    40,
@@ -87,14 +87,14 @@ BHAVCOPY_SYMBOL       = "NIFTY"          # NSE symbol in bhavcopy files
 UNDERLYINGS = [
     "^NSEI",        # Nifty 50
     "^NSEBANK",     # Bank Nifty
-    "NIFTYFIN.NS",  # Fin Nifty (NSE:FINNIFTY)
+    "NIFTY_FIN_SERVICE.NS",  # Fin Nifty (NSE:FINNIFTY)
 ]
 
 # Strike step per underlying (for ATM rounding)
 STRIKE_STEPS = {
     "^NSEI":       50.0,
     "^NSEBANK":   100.0,
-    "NIFTYFIN.NS": 50.0,
+    "NIFTY_FIN_SERVICE.NS": 50.0,
 }
 
 # ─────────────────────────────────────────────

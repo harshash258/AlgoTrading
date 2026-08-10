@@ -57,13 +57,13 @@ def send_telegram(message: str, token: str, chat_id: str) -> bool:
 TICKER_NAMES = {
     "^NSEI"      : "NIFTY 50",
     "^NSEBANK"   : "BANK NIFTY",
-    "NIFTYFIN.NS": "FIN NIFTY",
+    "NIFTY_FIN_SERVICE.NS": "FIN NIFTY",
 }
 
 STRIKE_STEPS = {
     "^NSEI"      : 50,
     "^NSEBANK"   : 100,
-    "NIFTYFIN.NS": 50,
+    "NIFTY_FIN_SERVICE.NS": 50,
 }
 
 
@@ -148,9 +148,14 @@ def generate_signal_message() -> str:
             f"Weekend — markets closed. No signals."
         )
 
-    # Load market data
+    # Load market data.
+    # Don't force_refresh the full window — most of it is already cached and
+    # yfinance can return empty for ^INDIAVIX on full-range requests even when
+    # the incremental (recent days only) request works fine.
+    # Use force_refresh=False so the cache logic runs the smarter incremental
+    # path, then fall back to cached data on any download failure.
     try:
-        data = get_combined_dataset(start=start, end=today, force_refresh=True)
+        data = get_combined_dataset(start=start, end=today, force_refresh=False)
         data = {k: v for k, v in data.items() if k in config.UNDERLYINGS}
     except Exception as e:
         return f"<b>Signal generation failed</b>\nData load error: {e}"

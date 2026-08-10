@@ -91,6 +91,34 @@ def fetch_ohlcv(
     logger.info(f"{ticker}: Downloading {start} → {end}")
     df = _download(ticker, start, end)
     if df is None or df.empty:
+        # Download failed — try an incremental update on top of the existing cache
+        # before giving up. Useful when yfinance returns empty for a known-flaky
+        # ticker (e.g. ^INDIAVIX) even though recent data is available.
+        if cached is not None:
+            cached_end = cached.index.max().date()
+            incremental_start = cached_end + timedelta(days=1)
+            if incremental_start <= end:
+                logger.warning(
+                    f"{ticker}: Full refresh failed. Trying incremental "
+                    f"{incremental_start} → {end} on top of cached data."
+                )
+                new_data = _download(ticker, incremental_start, end)
+                if new_data is not None and not new_data.empty:
+                    combined = pd.concat([cached, new_data])
+                    combined = combined[~combined.index.duplicated(keep="last")]
+                    combined.sort_index(inplace=True)
+                    _save_cache(combined, ticker)
+                    mask = (combined.index.date >= start) & (combined.index.date <= end)
+                    return combined.loc[mask].copy()
+            # Incremental also failed or not needed — serve cache as-is
+            logger.warning(
+                f"{ticker}: Download failed. Serving cached data "
+                f"(last date: {cached_end})."
+            )
+            mask = (cached.index.date >= start) & (cached.index.date <= end)
+            sliced = cached.loc[mask].copy()
+            if not sliced.empty:
+                return sliced
         raise ValueError(f"No data returned for {ticker} between {start} and {end}")
     _save_cache(df, ticker)
     return df.copy()
