@@ -12,7 +12,7 @@ on:
 jobs:
   send-signals:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
@@ -34,8 +34,30 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Restore the market data CSVs from the previous run.
+      # This means the runner only needs to fetch the last 1-2 days
+      # incrementally instead of a full 400-day download, which is far
+      # less likely to be blocked by Yahoo Finance.
+      - name: Restore market data cache
+        id: data-cache
+        uses: actions/cache@v4
+        with:
+          path: data/raw
+          key: market-data-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            market-data-${{ runner.os }}-
+
       - name: Generate and send signals
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python src/telegram_notify.py
+
+      # Always save the updated CSVs so the next run can use them.
+      # The cache key includes run_id so a fresh entry is saved each time.
+      - name: Save market data cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/raw
+          key: market-data-${{ runner.os }}-${{ github.run_id }}
