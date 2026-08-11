@@ -1,8 +1,10 @@
 """
 telegram_notify.py — Send trading signals to a Telegram chat.
 
-Runs the combined strategy signal generation and formats a clean
-Telegram message with actionable trade details.
+Runs ALL 13 strategies independently on today's data. Any strategy that
+fires a signal contributes it to the message with its name clearly labelled.
+Multiple signals on the same underlying are grouped. Conflicts (CE + PE on
+the same ticker) are flagged so you can decide.
 
 Usage (standalone):
     python src/telegram_notify.py
@@ -22,11 +24,164 @@ import requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 from src.data_ingestion import get_combined_dataset
+
+# ── All strategies ────────────────────────────────────────────────
 from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.rsi_strategy import RSIStrategy
-from src.strategies.combined_strategy import CombinedStrategy
+from src.strategies.confluence_strategy import ConfluenceStrategy
+from src.strategies.mean_reversion import MeanReversionStrategy
+from src.strategies.bollinger_band_strategy import BollingerBandStrategy
+from src.strategies.orb_strategy import ORBStrategy
+from src.strategies.long_straddle import LongStraddleStrategy
+from src.strategies.vwap_reversion import VWAPReversionStrategy
+from src.strategies.gap_fade import GapFadeStrategy
+from src.strategies.iron_condor import IronCondorStrategy
 
 logging.basicConfig(level=logging.WARNING)
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Strategy registry — every strategy the bot should run
+# Each entry: (display_name, factory_fn)
+# ─────────────────────────────────────────────────────────────────
+
+def _all_strategies() -> list[tuple[str, object]]:
+    """
+    Return a list of (display_label, strategy_instance) for every strategy.
+    Fresh instances are created each call so state never bleeds between runs.
+    """
+    return [
+        ("MA Crossover", TrendFollowingStrategy(
+            fast_ma=config.TREND_FAST_MA,
+            slow_ma=config.TREND_SLOW_MA,
+            use_adx_filter=False,
+            use_confirm=False,
+            use_direction_filter=False,
+            use_time_stop=False,
+        )),
+        ("MA Crossover (Full Filters)", TrendFollowingStrategy(
+            fast_ma=config.TREND_FAST_MA,
+            slow_ma=config.TREND_SLOW_MA,
+            use_adx_filter=True,
+            use_confirm=True,
+            use_direction_filter=True,
+            use_time_stop=True,
+        )),
+        ("RSI Reversal", RSIStrategy(
+            rsi_period=config.RSI_PERIOD,
+            oversold=config.RSI_OVERSOLD,
+            overbought=config.RSI_OVERBOUGHT,
+            confirm_bars=config.RSI_CONFIRM_BARS,
+            time_stop_days=config.RSI_TIME_STOP_DAYS,
+            weekly=True,
+        )),
+        ("Confluence (MA + RSI)", ConfluenceStrategy(
+            fast_ma=config.TREND_FAST_MA,
+            slow_ma=config.TREND_SLOW_MA,
+            rsi_period=config.RSI_PERIOD,
+            rsi_oversold=config.RSI_OVERSOLD,
+            rsi_overbought=config.RSI_OVERBOUGHT,
+            rsi_lookback=config.CONFLUENCE_RSI_LOOKBACK,
+            rsi_entry_max=config.CONFLUENCE_RSI_ENTRY_MAX,
+            rsi_entry_min=config.CONFLUENCE_RSI_ENTRY_MIN,
+            use_trend_filter=config.CONFLUENCE_USE_TREND_FILTER,
+            vix_min=config.BB_VIX_MIN,
+            vix_max=config.BB_VIX_MAX,
+            time_stop_days=config.CONFLUENCE_TIME_STOP_DAYS,
+            weekly=True,
+        )),
+        ("Opening Range Breakout", ORBStrategy(
+            breakout_pct=config.ORB_BREAKOUT_PCT,
+            gap_max_pct=config.ORB_GAP_MAX_PCT,
+            use_adx_filter=config.ORB_USE_ADX_FILTER,
+            time_stop_days=config.ORB_TIME_STOP_DAYS,
+            weekly=True,
+        )),
+        ("Short Strangle (High IV)", MeanReversionStrategy(
+            iv_entry_pct=config.MR_IV_PERCENTILE_ENTRY,
+            iv_exit_pct=config.MR_IV_PERCENTILE_EXIT,
+            otm_delta=config.MR_OTM_DELTA,
+            weekly=False,
+        )),
+        ("Bollinger Band Reversion", BollingerBandStrategy(
+            bb_period=config.BB_PERIOD,
+            bb_std=config.BB_STD_MULT,
+            atr_period=config.BB_ATR_PERIOD,
+            use_trend_filter=config.BB_USE_TREND_FILTER,
+            vix_min=config.BB_VIX_MIN,
+            vix_max=config.BB_VIX_MAX,
+            confirm_bars=config.BB_CONFIRM_BARS,
+            time_stop_days=config.BB_TIME_STOP_DAYS,
+            weekly=True,
+        )),
+        ("Long Straddle (Low IV)", LongStraddleStrategy(
+            iv_entry_pct=config.STRADDLE_IV_ENTRY_PCT,
+            iv_exit_pct=config.STRADDLE_IV_EXIT_PCT,
+            otm_delta=0.0,
+            time_stop_days=config.STRADDLE_TIME_STOP_DAYS,
+            weekly=True,
+        )),
+        ("Long Strangle (Low IV)", LongStraddleStrategy(
+            iv_entry_pct=config.STRADDLE_IV_ENTRY_PCT,
+            iv_exit_pct=config.STRADDLE_IV_EXIT_PCT,
+            otm_delta=0.25,
+            time_stop_days=config.STRADDLE_TIME_STOP_DAYS,
+            weekly=True,
+        )),
+        ("VWAP Reversion", VWAPReversionStrategy(
+            vwap_window=config.VWAP_WINDOW,
+            std_mult=config.VWAP_STD_MULT,
+            mode="reversion",
+            time_stop_days=config.VWAP_TIME_STOP_DAYS,
+            weekly=True,
+        )),
+        ("VWAP Breakout", VWAPReversionStrategy(
+            vwap_window=config.VWAP_WINDOW,
+            std_mult=config.VWAP_STD_MULT,
+            mode="breakout",
+            time_stop_days=config.VWAP_TIME_STOP_DAYS,
+            weekly=True,
+        )),
+        ("Gap Fade", GapFadeStrategy(
+            gap_min_pct=config.GAP_MIN_PCT,
+            gap_max_pct=config.GAP_MAX_PCT,
+            require_no_follow=config.GAP_REQUIRE_NO_FOLLOW,
+            trend_filter=config.GAP_TREND_FILTER,
+            time_stop_days=config.GAP_TIME_STOP_DAYS,
+            weekly=True,
+        )),
+        ("Iron Condor", IronCondorStrategy(
+            iv_entry_pct=config.IC_IV_ENTRY_PCT,
+            iv_exit_pct=config.IC_IV_EXIT_PCT,
+            body_delta=config.IC_BODY_DELTA,
+            wing_delta=config.IC_WING_DELTA,
+            use_adx_filter=config.IC_USE_ADX_FILTER,
+            adx_choppy_threshold=config.IC_ADX_CHOPPY_THRESHOLD,
+            time_stop_days=config.IC_TIME_STOP_DAYS,
+            weekly=False,
+        )),
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────────────────────────
+
+TICKER_NAMES = {
+    "^NSEI"               : "NIFTY 50",
+    "^NSEBANK"            : "BANK NIFTY",
+    "NIFTY_FIN_SERVICE.NS": "FIN NIFTY",
+}
+
+STRIKE_STEPS = {
+    "^NSEI"               : 50,
+    "^NSEBANK"            : 100,
+    "NIFTY_FIN_SERVICE.NS": 50,
+}
+
+# Short-vol strategies sell premium — use sell SL/target params
+_SHORT_VOL_LABELS = {"Short Strangle (High IV)", "Iron Condor"}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -50,261 +205,420 @@ def send_telegram(message: str, token: str, chat_id: str) -> bool:
         return False
 
 
-# ─────────────────────────────────────────────────────────────────
-# Ticker display names
-# ─────────────────────────────────────────────────────────────────
-
-TICKER_NAMES = {
-    "^NSEI"      : "NIFTY 50",
-    "^NSEBANK"   : "BANK NIFTY",
-    "NIFTY_FIN_SERVICE.NS": "FIN NIFTY",
-}
-
-STRIKE_STEPS = {
-    "^NSEI"      : 50,
-    "^NSEBANK"   : 100,
-    "NIFTY_FIN_SERVICE.NS": 50,
-}
+def _send_in_parts(messages: list[str], token: str, chat_id: str) -> bool:
+    """Send a list of message parts sequentially. Returns True if all succeed."""
+    success = True
+    for msg in messages:
+        if not send_telegram(msg, token, chat_id):
+            success = False
+    return success
 
 
 # ─────────────────────────────────────────────────────────────────
-# Source strategy label helper
+# Signal collection
 # ─────────────────────────────────────────────────────────────────
 
-def _has_conflict(sigs: list) -> bool:
-    """Return True if the signal list contains both CE and PE entries."""
-    types = {s.option_type for s in sigs}
-    return "CE" in types and "PE" in types
+def _collect_signals(
+    data: dict,
+    today: date,
+) -> dict:
+    """
+    Run all strategies on today's data.
 
+    Returns a nested dict:
+        {
+          ticker: {
+            "name"  : display name,
+            "spot"  : float,
+            "vix"   : float,
+            "atm"   : int,
+            "sigs"  : [
+                {
+                  "strategy_label": str,
+                  "direction"     : str,
+                  "option_type"   : str,
+                  "expiry"        : date | None,
+                  "strike"        : float,
+                  "meta"          : dict,
+                  "is_short"      : bool,
+                }
+            ]
+          }
+        }
+    """
+    strategies = _all_strategies()
+    collected: dict = {}
 
-def _source_label(sig) -> str:
-    """Return a short human-readable source strategy label."""
-    source = sig.meta.get("source_strategy", "")
-    if "rsi" in source:
-        return f"RSI {config.RSI_OVERSOLD}/{config.RSI_OVERBOUGHT}"
-    if "trend" in source or "ma" in source.lower():
-        return f"MA {config.TREND_FAST_MA}/{config.TREND_SLOW_MA}"
-    return source or "combined"
+    for strategy_label, strategy in strategies:
+        for ticker, df in data.items():
+            df_copy = df.copy()
+            df_copy.attrs["ticker"] = ticker
+            vix_series = df_copy.get("VIX", None)
+            if vix_series is None:
+                continue
 
+            try:
+                sigs = strategy.generate_signals(df_copy, vix_series, today)
+            except Exception as e:
+                logger.debug(f"{strategy_label} error on {ticker}: {e}")
+                continue
 
-def _trigger_label(sig) -> str:
-    """Return the trigger description for a signal."""
-    source = sig.meta.get("source_strategy", "")
-    if "rsi" in source:
-        rsi_val = sig.meta.get("rsi", "")
-        return f"RSI reversal ({rsi_val})"
-    return "MA crossover"
+            entry_sigs = [s for s in sigs if s.signal_type == "entry"]
+            if not entry_sigs:
+                continue
+
+            if ticker not in collected:
+                spot = float(df_copy["Close"].iloc[-1])
+                vix  = float(df_copy["VIX"].iloc[-1]) if "VIX" in df_copy.columns else 0.0
+                step = STRIKE_STEPS.get(ticker, 50)
+                collected[ticker] = {
+                    "name" : TICKER_NAMES.get(ticker, ticker),
+                    "spot" : spot,
+                    "vix"  : vix,
+                    "atm"  : round(spot / step) * step,
+                    "sigs" : [],
+                }
+
+            for sig in entry_sigs:
+                collected[ticker]["sigs"].append({
+                    "strategy_label": strategy_label,
+                    "direction"     : sig.direction,
+                    "option_type"   : sig.option_type,
+                    "expiry"        : sig.expiry,
+                    "strike"        : sig.strike,
+                    "meta"          : sig.meta,
+                    "is_short"      : sig.direction == "short",
+                })
+
+    return collected
 
 
 # ─────────────────────────────────────────────────────────────────
-# Format one signal block (preserves existing per-signal format)
+# Message formatting
 # ─────────────────────────────────────────────────────────────────
 
-def _format_signal_block(sig, spot: float, vix: float, atm: int,
-                          name: str, ticker: str,
-                          show_source: bool = False) -> str:
-    action     = "BUY CE" if sig.option_type == "CE" else "BUY PE"
-    expiry_str = sig.expiry.strftime("%d %b") if sig.expiry else "weekly"
-    risk_amt   = config.STARTING_CAPITAL * config.RISK_PER_TRADE_PCT / 100
-    lots_hint  = config.LOT_SIZES.get(ticker, config.DEFAULT_LOT_SIZE)
+def _format_signal_block(sig_info: dict, spot: float, vix: float,
+                          atm: int, ticker: str) -> str:
+    """Format one signal into a Telegram-ready block."""
+    label    = sig_info["strategy_label"]
+    opt_type = sig_info["option_type"]
+    is_short = sig_info["is_short"]
+    meta     = sig_info["meta"]
+    expiry   = sig_info["expiry"]
 
-    source_line = f"  (source: {_source_label(sig)})\n" if show_source else ""
+    # Strike: use resolved strike if set, else ATM
+    strike = int(sig_info["strike"]) if sig_info["strike"] > 0 else atm
+
+    action = ("SELL" if is_short else "BUY") + f" {opt_type}"
+    expiry_str = expiry.strftime("%d %b '%y") if expiry else "—"
+
+    # Trigger from meta
+    trigger = meta.get("trigger", meta.get("reason", ""))
+    if not trigger:
+        if "iv_percentile" in meta:
+            trigger = f"IV percentile {meta['iv_percentile']}%"
+        elif "gap_pct" in meta:
+            trigger = f"Gap {meta['gap_pct']:+.2f}%"
+        elif "fast_ma" in meta:
+            trigger = f"MA {meta.get('fast_ma', '?'):.0f} / {meta.get('slow_ma', '?'):.0f}"
+        elif "rsi" in meta:
+            trigger = f"RSI {meta['rsi']:.1f}"
+        else:
+            trigger = "signal"
+
+    # SL/target depends on long vs short
+    if is_short:
+        sl_line  = f"SL      : +{config.SELL_STOP_LOSS_PCT:.0f}% of premium received"
+        tgt_line = f"Target  : -{config.SELL_TARGET_PCT:.0f}% premium decay"
+    else:
+        sl_line  = f"SL      : -{config.BUY_STOP_LOSS_PCT:.0f}% of premium"
+        tgt_line = f"Target  : +{config.BUY_TARGET_PCT:.0f}% of premium"
+
+    risk_amt  = config.STARTING_CAPITAL * config.RISK_PER_TRADE_PCT / 100
+    lots_hint = config.LOT_SIZES.get(ticker, config.DEFAULT_LOT_SIZE)
+
+    # Iron condor leg tag
+    leg = meta.get("leg", "")
+    leg_line = f"  Leg     : {leg}\n" if leg else ""
 
     return (
-        f"<b>{action} {name}</b>\n"
-        f"{source_line}"
-        f"  Strike  : {atm} {sig.option_type}\n"
-        f"  Expiry  : {expiry_str}\n"
+        f"  <b>{action}</b>  [{label}]\n"
+        f"  Strike  : {strike} {opt_type}   Expiry: {expiry_str}\n"
         f"  Spot    : {spot:,.0f}  |  VIX: {vix:.1f}%\n"
-        f"  Trigger : {_trigger_label(sig)}\n"
-        f"  SL      : -{config.BUY_STOP_LOSS_PCT:.0f}% of premium\n"
-        f"  Target  : +{config.BUY_TARGET_PCT:.0f}% of premium\n"
-        f"  Risk    : Rs{risk_amt:,.0f} ({config.RISK_PER_TRADE_PCT}% capital)\n"
-        f"  Lot size: {lots_hint}"
+        f"  Trigger : {trigger}\n"
+        f"{leg_line}"
+        f"  {sl_line}\n"
+        f"  {tgt_line}\n"
+        f"  Risk    : ₹{risk_amt:,.0f} ({config.RISK_PER_TRADE_PCT}% capital)\n"
+        f"  Lots    : {lots_hint}"
     )
 
 
-# ─────────────────────────────────────────────────────────────────
-# Generate signals and format message
-# ─────────────────────────────────────────────────────────────────
+def _format_ticker_block(ticker: str, ticker_data: dict) -> str:
+    """Format all signals for one underlying into a message block."""
+    name  = ticker_data["name"]
+    spot  = ticker_data["spot"]
+    vix   = ticker_data["vix"]
+    atm   = ticker_data["atm"]
+    sigs  = ticker_data["sigs"]
 
-def generate_signal_message() -> str:
-    """
-    Run the combined strategy on today's data and return a formatted
-    Telegram message with conflict detection and grouping.
+    # Detect conflict: same underlying has both CE and PE entry signals
+    opt_types = {s["option_type"] for s in sigs}
+    has_conflict = "CE" in opt_types and "PE" in opt_types
 
-    - Signals grouped by underlying
-    - Conflicts (CE + PE on same underlying) sorted to the top
-    - Source strategy shown per signal when conflict exists
-    - No-conflict days look identical to the original format
-    """
-    today = date.today()
-    start = today - timedelta(days=400)  # enough history for MA 75
+    # Detect agreement: multiple different strategies pointing the same way
+    ce_strategies = [s["strategy_label"] for s in sigs if s["option_type"] == "CE"]
+    pe_strategies = [s["strategy_label"] for s in sigs if s["option_type"] == "PE"]
 
-    # Skip weekends
-    if today.weekday() >= 5:
-        return (
-            f"<b>NSE Options Signals — {today.strftime('%d %b %Y')}</b>\n\n"
-            f"Weekend — markets closed. No signals."
+    divider = "─" * 34
+
+    # Header line for this underlying
+    conflict_badge = "  ⚡ CONFLICT" if has_conflict else ""
+    header = f"<b>📊 {name}{conflict_badge}</b>"
+
+    # Agreement note
+    notes = []
+    if len(ce_strategies) >= 2:
+        notes.append(f"  ✅ {len(ce_strategies)} strategies agree: BUY CE ({', '.join(ce_strategies)})")
+    if len(pe_strategies) >= 2:
+        notes.append(f"  ✅ {len(pe_strategies)} strategies agree: BUY PE ({', '.join(pe_strategies)})")
+    if has_conflict:
+        notes.append(
+            f"  ⚠️ Mixed signals — CE from: {', '.join(ce_strategies) or '—'} "
+            f"| PE from: {', '.join(pe_strategies) or '—'}"
+        )
+    note_block = "\n".join(notes)
+
+    # Individual signal blocks
+    sig_blocks = []
+    for sig_info in sigs:
+        sig_blocks.append(
+            _format_signal_block(sig_info, spot, vix, atm, ticker)
         )
 
-    # Load market data.
-    # Don't force_refresh the full window — most of it is already cached and
-    # yfinance can return empty for ^INDIAVIX on full-range requests even when
-    # the incremental (recent days only) request works fine.
-    # Use force_refresh=False so the cache logic runs the smarter incremental
-    # path, then fall back to cached data on any download failure.
+    body = f"\n\n{divider}\n".join(sig_blocks)
+
+    parts = [header]
+    if note_block:
+        parts.append(note_block)
+    parts.append(body)
+
+    return f"\n".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Split long messages for Telegram's 4096-char limit
+# ─────────────────────────────────────────────────────────────────
+
+_MAX_MSG_LEN = 4000  # leave some headroom below 4096
+
+def _split_message(header: str, ticker_blocks: list[str], footer: str) -> list[str]:
+    """
+    Pack ticker blocks into messages that fit within Telegram's limit.
+    The header goes on the first message, footer on the last.
+    """
+    messages = []
+    current  = header
+
+    for i, block in enumerate(ticker_blocks):
+        separator = "\n\n" + "═" * 34 + "\n\n"
+        candidate = current + separator + block
+
+        if len(candidate) > _MAX_MSG_LEN and current != header:
+            # Current message is full — flush it
+            messages.append(current)
+            current = f"<b>NSE Signals (cont.)</b>\n" + "═" * 34 + "\n\n" + block
+        else:
+            current = candidate if current != header else header + "\n\n" + "═" * 34 + "\n\n" + block
+
+    # Attach footer to last message
+    current += footer
+    messages.append(current)
+
+    return messages
+
+
+# ─────────────────────────────────────────────────────────────────
+# Main signal generator
+# ─────────────────────────────────────────────────────────────────
+
+def generate_signal_messages() -> list[str]:
+    """
+    Run all 13 strategies on today's data and return a list of
+    formatted Telegram message strings (split if needed for length).
+
+    Returns a list of strings — send each one as a separate message.
+    """
+    today = date.today()
+    start = today - timedelta(days=400)  # enough history for slowest indicators
+
+    # ── Weekend check ─────────────────────────────────────────────
+    if today.weekday() >= 5:
+        return [(
+            f"<b>NSE Options Signals — {today.strftime('%d %b %Y')}</b>\n\n"
+            f"Weekend — markets closed. No signals today."
+        )]
+
+    # ── Load data ─────────────────────────────────────────────────
     try:
         data = get_combined_dataset(start=start, end=today, force_refresh=False)
         data = {k: v for k, v in data.items() if k in config.UNDERLYINGS}
     except Exception as e:
-        return f"<b>Signal generation failed</b>\nData load error: {e}"
+        return [f"<b>Signal generation failed</b>\nData load error: {e}"]
 
     if not data:
-        return "<b>Signal generation failed</b>\nNo market data available."
+        return ["<b>Signal generation failed</b>\nNo market data available."]
 
-    # Staleness / VIX fallback warnings
-    stale_warning = ""
+    # ── Staleness / VIX warnings ──────────────────────────────────
+    warnings = []
     for ticker, df in data.items():
         if df.index.max().date() < today:
-            stale_warning = (
-                f"\n<b>WARNING:</b> Data for {ticker} is from "
-                f"{df.index.max().date()}, not today. Signal may be 1 day old."
+            warnings.append(
+                f"⚠️ {TICKER_NAMES.get(ticker, ticker)} data is from "
+                f"{df.index.max().date()} (not today) — signal may lag by 1 day."
             )
-            break
 
-    # Detect VIX fallback: all VIX values identical across the last 30 rows
-    # means the constant fallback was used (no real ^INDIAVIX data available).
     from src.data_ingestion import _VIX_FALLBACK
     first_df = next(iter(data.values()))
     if "VIX" in first_df.columns:
         recent_vix = first_df["VIX"].dropna().tail(30)
         if len(recent_vix) > 1 and recent_vix.nunique() == 1:
-            stale_warning += (
-                f"\n<b>WARNING:</b> India VIX unavailable from Yahoo Finance. "
-                f"Using fallback IV = {_VIX_FALLBACK}%. "
-                f"Options pricing is approximate today."
+            warnings.append(
+                f"⚠️ India VIX unavailable — using fallback {_VIX_FALLBACK}%. "
+                f"Options pricing is approximate."
             )
 
-    # Build strategy
-    strategy = CombinedStrategy([
-        TrendFollowingStrategy(
-            fast_ma=config.TREND_FAST_MA,
-            slow_ma=config.TREND_SLOW_MA,
-            use_adx_filter=False,
-            use_confirm=False,
-            use_direction_filter=False,
-            use_time_stop=False,
-        ),
-        RSIStrategy(
-            rsi_period=config.RSI_PERIOD,
-            oversold=config.RSI_OVERSOLD,
-            overbought=config.RSI_OVERBOUGHT,
-            confirm_bars=config.RSI_CONFIRM_BARS,
-            time_stop_days=config.RSI_TIME_STOP_DAYS,
-            weekly=True,
-        ),
-    ])
+    # ── Collect all signals ───────────────────────────────────────
+    collected = _collect_signals(data, today)
 
-    # ── Collect all entry signals grouped by ticker ───────────────
-    # grouped: { ticker: { spot, vix, atm, name, sigs: [Signal, ...] } }
-    grouped: dict = {}
+    # ── Count active strategies ───────────────────────────────────
+    n_strategies = len(_all_strategies())
 
-    for ticker, df in data.items():
-        df.attrs["ticker"] = ticker
-        vix_series = df.get("VIX", None)
-        if vix_series is None:
-            continue
-
-        sigs = strategy.generate_signals(df, vix_series, today)
-        entry_sigs = [s for s in sigs if s.signal_type == "entry"]
-        if not entry_sigs:
-            continue
-
-        spot = float(df["Close"].iloc[-1])
-        vix  = float(df["VIX"].iloc[-1]) if "VIX" in df.columns else 0.0
-        step = STRIKE_STEPS.get(ticker, 50)
-        atm  = round(spot / step) * step
-
-        grouped[ticker] = {
-            "spot": spot,
-            "vix" : vix,
-            "atm" : atm,
-            "name": TICKER_NAMES.get(ticker, ticker),
-            "sigs": entry_sigs,
-        }
-
-    # ── Detect conflicts per ticker ───────────────────────────────
-    # conflict = same underlying has both CE and PE entry signals
-    conflict_tickers = [t for t, g in grouped.items() if _has_conflict(g["sigs"])]
-    clean_tickers    = [t for t in grouped if t not in conflict_tickers]
-
-    # ── Build output blocks — conflicts first ─────────────────────
-    section_blocks = []
-
-    for ticker in conflict_tickers + clean_tickers:
-        g       = grouped[ticker]
-        sigs    = g["sigs"]
-        name    = g["name"]
-        is_conf = ticker in conflict_tickers
-
-        # Conflict header
-        if is_conf:
-            heading = f"<b>CONFLICT — {name}</b>"
-        else:
-            heading = None  # no extra heading for clean signals
-
-        # Format each signal in this group
-        # Show source always when there's a conflict; hide it when clean
-        sig_lines = []
-        for sig in sigs:
-            block = _format_signal_block(
-                sig, g["spot"], g["vix"], g["atm"],
-                name, ticker,
-                show_source=is_conf,
-            )
-            sig_lines.append(block)
-
-        divider = "─" * 32
-
-        if is_conf:
-            group_block = (
-                f"{divider}\n"
-                f"{heading}\n"
-                f"{divider}\n"
-                + "\n\n".join(sig_lines)
-            )
-        else:
-            group_block = "\n\n".join(sig_lines)
-
-        section_blocks.append(group_block)
-
-    # ── Assemble final message ────────────────────────────────────
+    # ── Build header ──────────────────────────────────────────────
+    total_signals = sum(len(v["sigs"]) for v in collected.values())
     header = (
-        f"<b>NSE Options Signals</b>\n"
-        f"Date    : {today.strftime('%d %b %Y')} (execute tomorrow)\n"
-        f"Strategy: MA {config.TREND_FAST_MA}/{config.TREND_SLOW_MA}"
-        f" + RSI {config.RSI_OVERSOLD}/{config.RSI_OVERBOUGHT}\n"
-        f"{'─' * 32}"
+        f"<b>🔔 NSE Options Signals</b>\n"
+        f"Date       : {today.strftime('%d %b %Y')} (execute tomorrow at open)\n"
+        f"Strategies : {n_strategies} running\n"
+        f"Signals    : {total_signals} across {len(collected)} underlying(s)"
     )
+    if warnings:
+        header += "\n\n" + "\n".join(warnings)
 
-    if not section_blocks:
-        body = "\nNo signals today. Stay out of the market."
-    else:
-        body = "\n\n" + "\n\n".join(section_blocks)
-
+    # ── Build footer ──────────────────────────────────────────────
     footer = (
-        f"\n{'─' * 32}\n"
+        f"\n\n{'─' * 34}\n"
         f"Execute manually on Groww at market open.\n"
-        f"Set GTT stop-loss immediately after entry."
-        + stale_warning
+        f"Set GTT stop-loss immediately after entry.\n"
+        f"Confirm strike availability before placing order."
     )
 
-    return header + body + footer
+    # ── No signals case ───────────────────────────────────────────
+    if not collected:
+        return [header + "\n\n<i>No signals today across all strategies. Stay out.</i>" + footer]
+
+    # ── Format per-ticker blocks ──────────────────────────────────
+    ticker_blocks = []
+    for ticker in collected:
+        ticker_blocks.append(_format_ticker_block(ticker, collected[ticker]))
+
+    # ── Split into Telegram-sized messages ────────────────────────
+    return _split_message(header, ticker_blocks, footer)
 
 
 # ─────────────────────────────────────────────────────────────────
-# Main
+# Legacy single-message API (keeps main.py cmd_signals working)
+# ─────────────────────────────────────────────────────────────────
+
+def generate_signal_message(strategy=None) -> str:
+    """
+    Backward-compatible wrapper. If strategy is supplied, runs only that
+    strategy (old behaviour). If None, runs all strategies (new behaviour)
+    and joins parts with a separator for console display.
+    """
+    if strategy is not None:
+        # Old path — single strategy, kept for CLI --strategy flag
+        from src.strategies.combined_strategy import CombinedStrategy
+        from src.strategies.inverse_strategy import InverseStrategy
+        from src.strategies.trend_following import TrendFollowingStrategy
+        from src.strategies.rsi_strategy import RSIStrategy
+
+        today = date.today()
+        start = today - timedelta(days=400)
+
+        if today.weekday() >= 5:
+            return (
+                f"<b>NSE Options Signals — {today.strftime('%d %b %Y')}</b>\n\n"
+                f"Weekend — markets closed. No signals."
+            )
+
+        try:
+            data = get_combined_dataset(start=start, end=today, force_refresh=False)
+            data = {k: v for k, v in data.items() if k in config.UNDERLYINGS}
+        except Exception as e:
+            return f"<b>Signal generation failed</b>\nData load error: {e}"
+
+        if not data:
+            return "<b>Signal generation failed</b>\nNo market data available."
+
+        is_inverse = isinstance(strategy, InverseStrategy)
+        strategy_label = strategy.name
+
+        grouped: dict = {}
+        for ticker, df in data.items():
+            df.attrs["ticker"] = ticker
+            vix_series = df.get("VIX", None)
+            if vix_series is None:
+                continue
+            sigs = strategy.generate_signals(df, vix_series, today)
+            entry_sigs = [s for s in sigs if s.signal_type == "entry"]
+            if not entry_sigs:
+                continue
+            spot = float(df["Close"].iloc[-1])
+            vix  = float(df["VIX"].iloc[-1]) if "VIX" in df.columns else 0.0
+            step = STRIKE_STEPS.get(ticker, 50)
+            atm  = round(spot / step) * step
+            grouped[ticker] = {
+                "name": TICKER_NAMES.get(ticker, ticker),
+                "spot": spot, "vix": vix, "atm": atm,
+                "sigs": [{
+                    "strategy_label": strategy_label,
+                    "direction": s.direction,
+                    "option_type": s.option_type,
+                    "expiry": s.expiry,
+                    "strike": s.strike,
+                    "meta": s.meta,
+                    "is_short": s.direction == "short",
+                } for s in entry_sigs],
+            }
+
+        header = (
+            f"<b>NSE Options Signals</b>\n"
+            f"Date    : {today.strftime('%d %b %Y')} (execute tomorrow)\n"
+            f"Strategy: {strategy_label}"
+        )
+        if is_inverse:
+            header += "\n⚠️ INVERSE MODE: CE/PE directions are flipped."
+
+        if not grouped:
+            return header + "\n\nNo signals today. Stay out of the market."
+
+        blocks = [_format_ticker_block(t, d) for t, d in grouped.items()]
+        body   = "\n\n" + ("\n\n" + "═" * 34 + "\n\n").join(blocks)
+        footer = (
+            f"\n{'─' * 34}\n"
+            f"Execute manually on Groww at market open.\n"
+            f"Set GTT stop-loss immediately after entry."
+        )
+        return header + body + footer
+
+    # New path — all strategies
+    parts = generate_signal_messages()
+    return "\n\n".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Main — sends all-strategy messages
 # ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -316,24 +630,29 @@ def main():
         print("Export them as environment variables or add them as GitHub Secrets.")
         sys.exit(1)
 
-    print("Generating signals...")
-    message = generate_signal_message()
+    print("Generating signals from all strategies...")
+    messages = generate_signal_messages()
 
     # Always print to console (useful in GitHub Actions logs)
-    print("\n" + message.replace("<b>", "").replace("</b>", "") + "\n")
+    print("\n" + "="*60)
+    for msg in messages:
+        clean = msg.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+        print(clean)
+        print()
+    print("="*60 + "\n")
 
-    # Skip Telegram send on weekends — no point notifying, markets closed
-    if "Weekend" in message:
+    # Skip Telegram send on weekends
+    if any("Weekend" in m for m in messages):
         print("Weekend — skipping Telegram notification.")
         sys.exit(0)
 
-    print("Sending to Telegram...")
-    success = send_telegram(message, token, chat_id)
+    print(f"Sending {len(messages)} message(s) to Telegram...")
+    success = _send_in_parts(messages, token, chat_id)
 
     if success:
         print("Telegram notification sent successfully.")
     else:
-        print("Failed to send Telegram notification.")
+        print("Failed to send one or more Telegram messages.")
         sys.exit(1)
 
 

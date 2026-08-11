@@ -1,8 +1,8 @@
 # Algo Trading — NSE Options System
 
-Python-based backtesting, signal generation, and parameter optimization for NSE options (India).
-Supports both buying and selling strategies, multi-day positional trades.
-Generates interactive HTML reports with full trade logs and charts.
+Python-based backtesting, signal generation, strategy exploration, and parameter optimization
+for NSE index options (India). Supports directional, volatility, mean-reversion, and
+delta-neutral strategies. Generates interactive HTML reports with full trade logs and charts.
 Daily signals delivered automatically via Telegram using GitHub Actions.
 
 ---
@@ -12,23 +12,20 @@ Daily signals delivered automatically via Telegram using GitHub Actions.
 ### 1. Install dependencies
 
 ```bash
-cd "d:\Projects\Algo Trading"
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Run your first backtest (Combined strategy on Nifty 50)
+### 2. Run your first backtest
 
 ```bash
 python main.py backtest --strategy combined --ticker ^NSEI
 ```
 
-This will:
-- Download historical Nifty 50 + India VIX data (cached after first run)
-- Run MA crossover + RSI combined strategy, simulate options trades
-- Print a metrics summary in the terminal
-- Save an HTML report to `reports/` — open in browser
+This downloads Nifty 50 + India VIX data (cached after first run), runs the MA crossover + RSI
+combined strategy, simulates options trades, prints a metrics summary, and saves an HTML report
+to `reports/`. Open it in any browser.
 
 ### 3. Generate today's signals
 
@@ -36,7 +33,15 @@ This will:
 python main.py signals --strategy combined --ticker ^NSEI
 ```
 
-### 4. Refresh data cache
+### 4. Find the best strategy combination
+
+```bash
+python strategy_explorer.py                        # singles + pairs, all tickers
+python strategy_explorer.py --max-combo 3          # up to 3-strategy combos
+python strategy_explorer.py --no-bhavcopy          # fast run using Black-Scholes
+```
+
+### 5. Refresh data cache
 
 ```bash
 python main.py fetch
@@ -46,100 +51,201 @@ python main.py fetch
 
 ## Available Strategies
 
-| Key          | Strategy                         | Type                           |
-|--------------|----------------------------------|--------------------------------|
-| `trend`      | MA Crossover (fast/slow)         | Long options, directional      |
-| `trend_raw`  | MA Crossover (no filters)        | Long options, directional      |
-| `rsi`        | RSI Reversal (Wilder smoothing)  | Long options, mean-reversion   |
-| `combined`   | MA Crossover + RSI (both active) | Long options, dual-signal      |
-| `mean_rev`   | Short Strangle on High IV        | Short options, non-directional |
+13 strategies across 4 categories. Mix any combination using `--strategy` or the
+strategy explorer.
 
-The `combined` strategy is the default and recommended choice. It runs both MA crossover and
-RSI signals simultaneously — each strategy maintains independent state and the risk manager
-enforces the global position cap.
+### Directional (long options, pick direction)
+
+| Key           | Strategy                          | Signal source                                 |
+|---------------|-----------------------------------|-----------------------------------------------|
+| `trend`       | MA Crossover (basic)              | Fast MA crosses above/below slow MA           |
+| `trend_full`  | MA Crossover (all filters on)     | MA cross + ADX + confirmation + 200MA filter  |
+| `rsi`         | RSI Reversal                      | RSI crosses oversold/overbought thresholds    |
+| `confluence`  | MA + RSI Agreement                | Both MA and RSI must agree on direction       |
+| `orb`         | Opening Range Breakout            | Close > Open ± N% (daily breakout proxy)      |
+
+### Volatility / Mean Reversion (non-directional)
+
+| Key           | Strategy                          | Signal source                                 |
+|---------------|-----------------------------------|-----------------------------------------------|
+| `mean_rev`    | Short Strangle on High IV         | IV percentile > threshold → sell CE + PE      |
+| `bb`          | Bollinger Band Reversion          | Price touches band edge, reverts to mean      |
+| `iron_condor` | Iron Condor (delta-neutral)       | High IV + choppy (ADX < threshold) → 4-leg   |
+
+### Long Volatility (buy vol cheap, profit from expansion)
+
+| Key           | Strategy                          | Signal source                                 |
+|---------------|-----------------------------------|-----------------------------------------------|
+| `straddle`    | Long ATM Straddle                 | IV percentile < threshold → buy CE + PE ATM   |
+| `strangle`    | Long OTM Strangle                 | IV percentile < threshold → buy OTM CE + PE   |
+
+### Intraday-proxy / Price Action
+
+| Key           | Strategy                          | Signal source                                 |
+|---------------|-----------------------------------|-----------------------------------------------|
+| `vwap_rev`    | VWAP Reversion                    | Price crosses back inside VWAP σ-band         |
+| `vwap_brk`    | VWAP Breakout                     | Price breaks and holds outside VWAP σ-band    |
+| `gap_fade`    | Gap Fade                          | Opening gap > N% with no follow-through       |
+
+### Meta-strategies
+
+| Key               | Description                                             |
+|-------------------|---------------------------------------------------------|
+| `combined`        | Runs MA crossover + RSI simultaneously, merges signals  |
+| `inv_<any>`       | Inverts any strategy — flips CE↔PE on every signal      |
+
+**Telegram bot uses:** `combined` (MA Crossover 25/75 + RSI 14, thresholds 25/65).
+
+---
+
+## Strategy Design Philosophy
+
+The strategy book is designed to cover all market regimes:
+
+| Regime       | Suitable strategies                          |
+|--------------|----------------------------------------------|
+| Trending up  | `trend`, `orb`, `confluence`, `vwap_brk`     |
+| Trending down| `trend`, `orb` (PE), `gap_fade`              |
+| Choppy/range | `iron_condor`, `mean_rev`, `vwap_rev`, `bb`  |
+| Low IV day   | `straddle`, `strangle`                       |
+| High IV day  | `mean_rev`, `iron_condor`                    |
+| Gap open     | `gap_fade`                                   |
+
+**Vol balance:** `mean_rev` and `iron_condor` sell premium (high IV) while `straddle`/`strangle`
+buy premium (low IV) — a natural pair. The combined strategy book is designed so something works
+in any regime rather than everything working only in one.
+
+---
+
+## Running Backtests
+
+```bash
+# Single strategy
+python main.py backtest --strategy orb --ticker ^NSEI
+
+# Combined strategy on multiple tickers
+python main.py backtest --strategy combined
+
+# Iron condor on BankNifty
+python main.py backtest --strategy iron_condor --ticker ^NSEBANK
+
+# Invert any strategy (flip CE↔PE)
+python main.py backtest --strategy inv_trend --ticker ^NSEI
+
+# Force-refresh market data before backtest
+python main.py backtest --strategy combined --refresh
+```
+
+HTML report saved to `reports/report_<strategy>_<date>.html`. Trade CSV saved alongside it.
+
+---
+
+## Strategy Explorer
+
+`strategy_explorer.py` tests every single strategy, every pair, and (optionally) every
+3+ combination by running full backtests and ranking by any metric.
+
+```bash
+# All singles + pairs (13 singles + 78 pairs = 91 backtests)
+python strategy_explorer.py
+
+# Up to triples (~377 backtests)
+python strategy_explorer.py --max-combo 3
+
+# Only test specific strategies
+python strategy_explorer.py --include trend rsi straddle iron_condor
+
+# Exclude strategies
+python strategy_explorer.py --exclude vwap_rev vwap_brk gap_fade
+
+# Sort by CAGR instead of profit factor
+python strategy_explorer.py --sort cagr_pct
+
+# Fast run (Black-Scholes pricing, no bhavcopy load)
+python strategy_explorer.py --no-bhavcopy
+
+# Specific ticker and date range
+python strategy_explorer.py --ticker ^NSEI --start 2020-01-01 --end 2024-12-31
+
+# Raise minimum trades threshold
+python strategy_explorer.py --min-trades 20
+
+# List all available strategy names
+python strategy_explorer.py --list
+```
+
+**Sort metrics:** `profit_factor` (default), `cagr_pct`, `total_return_pct`,
+`sharpe_per_trade`, `sortino_per_trade`, `win_rate_pct`, `max_drawdown_pct`, `total_trades`.
+
+**Output:**
+- Full ranked table (all combos, sorted by chosen metric)
+- Breakdown tables by combo size (singles / pairs / triples)
+- Best single strategy and best overall combination callouts
+- Vol-balance note — flags if top-10 combos pair a short-vol + long-vol strategy
+- CSV saved to `reports/strategy_explorer_YYYY-MM-DD.csv`
+
+### Sample Result (^NSEI, 2022–2023, singles only, Black-Scholes)
+
+| Rank | Strategy   | Trades | WR%   | Return% | CAGR%   | PF    | Sharpe | MaxDD% |
+|------|------------|--------|-------|---------|---------|-------|--------|--------|
+| 1    | trend      | 4      | 25.0% | +1.4%   | +0.7%   | 1.813 | 0.210  | 1.72%  |
+| 2    | orb        | 122    | 40.2% | +49.1%  | +22.3%  | 1.522 | 0.155  | 10.28% |
+| 3    | rsi        | 13     | 53.9% | +1.9%   | +1.0%   | 1.240 | 0.063  | 5.10%  |
+| 4    | vwap_brk   | 38     | 26.3% | +2.2%   | +1.1%   | 1.079 | 0.011  | 11.09% |
+| 5    | straddle   | 54     | 35.2% | −2.0%   | −1.0%   | 0.945 | −0.008 | 10.08% |
+| 6–10 | (others)  | —      | —     | negative| —       | <0.6  | <0     | 12–16% |
+
+*Note: run over the full 2015–2026 period for statistically meaningful sample sizes.*
 
 ---
 
 ## Parameter Optimization
 
-The system includes a two-level optimization framework to find the best parameter combination
-for the combined strategy (MA Crossover + RSI) and associated risk settings.
+Two-level framework to find the best MA × RSI parameter combination.
 
-### Level 1 — Grid Search (`src/optimizer.py`)
-
-Searches all valid combinations of:
-
-| Parameter        | Values tested              |
-|------------------|----------------------------|
-| `fast_ma`        | 5, 10, 15, 20, 25          |
-| `slow_ma`        | 30, 40, 50, 60, 75         |
-| `rsi_oversold`   | 25, 30, 35, 40             |
-| `rsi_overbought` | 60, 65, 70, 75             |
-| `stop_loss_pct`  | 40, 50, 60, 70             |
-| `target_pct`     | 75, 100, 150, 200          |
-
-Invalid combos are automatically skipped (`fast_ma >= slow_ma`, `oversold >= overbought`).
-Total valid combinations: **6,400** (full grid) or **144** (quick grid).
-
-**Key optimization insight:** `stop_loss_pct` and `target_pct` don't affect signal generation —
-only exit timing. Signal backtests run once per (fast_ma, slow_ma, rsi_oversold, rsi_overbought)
-combo, then trades are replayed with different SL/target settings in O(trades) time. This reduces
-actual backtests from 6,400 → 400 (16x speedup).
-
-**Ranking**: Primary metric is Profit Factor (most robust, least sensitive to outliers).
-Tiebreaker is Sharpe per trade. Results with fewer than 10 trades are excluded.
-
-**What it does:**
-- Loads the NSE bhavcopy option chain **once** at startup (30-60s), reuses it for all runs
-- Patches config values in-memory per run — `config.py` is never modified during the search
-- Creates fresh strategy instances per run to avoid state bleed
-- Prints a live progress bar: `Testing 47/6400 | Best so far: PF=2.14 (fast=10, slow=40, os=30, ob=70)`
-- Saves ranked results to `reports/optimization_results_YYYY-MM-DD.csv`
-- Auto-updates `config.py` with the top-ranked parameter set and prints a diff
-
-**Run it:**
+### Level 1 — Grid Search
 
 ```bash
-# Full grid search (~6,400 combinations)
-python main.py optimize
-
-# Quick grid (~144 combinations, faster for testing)
-python main.py optimize --quick
-
-# Full grid, then run Level 2 walk-forward on top 5 results
-python main.py optimize --top 5
-
-# Custom minimum trades threshold
+python main.py optimize              # full grid (~6,400 combos)
+python main.py optimize --quick      # reduced grid (~144 combos)
+python main.py optimize --top 5      # grid search then walk-forward on top 5
 python main.py optimize --min-trades 20
-
-# Run on a specific underlying only
 python main.py optimize --ticker ^NSEI
 ```
 
-**Output CSV columns:**
+**What gets searched:**
 
+| Parameter        | Full grid values           | Quick grid values  |
+|------------------|----------------------------|--------------------|
+| `fast_ma`        | 5, 10, 15, 20, 25          | 10, 20, 25         |
+| `slow_ma`        | 30, 40, 50, 60, 75         | 40, 50, 75         |
+| `rsi_oversold`   | 25, 30, 35, 40             | 30, 35             |
+| `rsi_overbought` | 60, 65, 70, 75             | 65, 70             |
+| `stop_loss_pct`  | 40, 50, 60, 70             | 50, 60             |
+| `target_pct`     | 75, 100, 150, 200          | 100, 150           |
+
+**Speed trick:** `stop_loss_pct` and `target_pct` don't affect signal generation — only exit
+timing. Signals run once per (fast_ma × slow_ma × rsi) combo, then trades are replayed with
+different SL/target in O(trades) time. Reduces actual backtests from 6,400 → 400 (16× speedup).
+
+**Ranking:** Primary = Profit Factor. Tiebreaker = Sharpe per trade.
+
+After the run, best parameters are auto-written back to `config.py` with a diff printed.
+Results saved to `reports/optimization_results_YYYY-MM-DD.csv`.
+
+### Level 2 — Walk-Forward Validation
+
+Validates top-N param sets against unseen out-of-sample periods to catch overfitting.
+
+```bash
+python main.py optimize --top 5      # run Level 1 then Level 2 on top 5
 ```
-rank, fast_ma, slow_ma, rsi_oversold, rsi_overbought, stop_loss_pct, target_pct,
-total_trades, win_rate_pct, total_return_pct, cagr_pct, profit_factor,
-sharpe_per_trade, sortino_per_trade, max_drawdown_pct, avg_held_days
-```
 
-### Level 2 — Walk-Forward Validation (`src/walk_forward.py`)
+**Rolling window (defaults):** 3-year train → 1-year test → step 1 year.
 
-Validates the top N parameter sets from Level 1 against **unseen out-of-sample periods**
-to check whether the results are genuinely robust or just in-sample overfitting.
+**Example folds (2015–2026):**
 
-**Rolling window logic (defaults):**
-
-| Setting       | Value   |
-|---------------|---------|
-| Train window  | 3 years |
-| Test window   | 1 year  |
-| Step          | 1 year (rolling) |
-
-**Example folds for 2015-2026 data:**
-
-| Fold | Train Period            | Test Period |
+| Fold | Train period            | Test period |
 |------|-------------------------|-------------|
 | 1    | 2015-01-01 → 2017-12-31 | 2018        |
 | 2    | 2016-01-01 → 2018-12-31 | 2019        |
@@ -150,39 +256,30 @@ to check whether the results are genuinely robust or just in-sample overfitting.
 | 7    | 2021-01-01 → 2023-12-31 | 2024        |
 | 8    | 2022-01-01 → 2024-12-31 | 2025        |
 
-**Per parameter set, it reports:**
-- Per-fold table: `fold | train_period | test_period | train_pf | test_pf | return% | win_rate | dd%`
+**Per param set reports:**
+- Per-fold: `fold | train_pf | test_pf | return% | win_rate | dd% | trades`
 - Mean and std of out-of-sample profit factor across all folds
-- Consistency score: % of folds where profit factor > 1.0 (profitable)
-- Overfitting flag: raised when in-sample PF exceeds out-of-sample PF by more than 50%
+- Consistency score: % of folds where PF > 1.0
+- Overfitting flag: raised when in-sample PF > out-of-sample PF by more than 50%
 
-**Final recommendation printed:**
-```
-RECOMMENDED PARAMS: fast_ma=X, slow_ma=Y, rsi_oversold=Z, rsi_overbought=W,
-stop_loss_pct=A, target_pct=B
-Consistent across N/8 folds (X% profitable), avg OOS profit_factor=Z
-```
-
-**Output saved to:** `reports/walk_forward_results_YYYY-MM-DD.csv`
+Output: `reports/walk_forward_results_YYYY-MM-DD.csv`
 
 ---
 
 ## NSE Bhavcopy (Real Options Chain Data)
 
-The system uses real historical NSE F&O option chain data instead of synthetic Black-Scholes
-pricing by default (`BHAVCOPY_FOLDER = "data/bhavcopy"` in config.py). This significantly
-improves backtest accuracy.
-
-### Download bhavcopy files
+By default the system uses real historical NSE F&O option chain data from bhavcopy files
+(`BHAVCOPY_FOLDER = "data/bhavcopy"` in config.py) instead of synthetic Black-Scholes pricing.
+This significantly improves backtest accuracy for NIFTY options specifically.
 
 ```bash
-# Download full history (2015 to yesterday)
+# Download full history (2015 to yesterday, ~2,300 files)
 python main.py bhavcopy
 
 # Download last 30 days only (quick test)
 python main.py bhavcopy --days 30
 
-# Download a specific date range
+# Specific date range
 python main.py bhavcopy --start 2023-01-01 --end 2024-12-31
 
 # Re-download existing files
@@ -193,44 +290,37 @@ python main.py bhavcopy --verify
 ```
 
 Files are saved to `data/bhavcopy/` as `fo<DD><MON><YYYY>bhav.csv.zip`.
-Set `BHAVCOPY_FOLDER = None` in `config.py` to fall back to synthetic Black-Scholes pricing.
+Set `BHAVCOPY_FOLDER = None` in config.py to use synthetic Black-Scholes (faster, less accurate).
 
-The `ChainLookup` class in `data_ingestion.py` provides fast (date, expiry, strike, opt_type)
-→ premium lookup over the loaded chain. It handles multi-year NSE schema variations automatically.
+The `ChainLookup` class provides fast (date, expiry, strike, option_type) → premium lookup.
+On any date without bhavcopy data, the system silently falls back to Black-Scholes.
 
 ---
 
 ## Daily Signals via Telegram
 
-The system sends automated daily trading signals to a Telegram chat using GitHub Actions.
+GitHub Actions sends signals every weekday at 4:15 PM IST (45 min after NSE close).
 
-### How it works
+**What the bot sends:**
+- BUY CE / BUY PE per underlying
+- Strike, expiry, spot, India VIX, trigger label
+- Stop-loss %, target %, risk amount in ₹, lot size
+- Conflict detection: if MA and RSI disagree on the same underlying, both signals are shown
+  with source labels so you can decide
 
-The GitHub Actions workflow (`.github/workflows/daily_signals.yml`) runs every weekday at
-4:15 PM IST (10:45 UTC) — 45 minutes after NSE market close, ensuring yfinance has today's
-candle. It can also be triggered manually from the GitHub UI.
+**Strategy used by the bot:** `CombinedStrategy(TrendFollowing + RSI)` with current config
+params (fast MA 25, slow MA 75, RSI 14, oversold 25, overbought 65).
 
-The signal message includes:
-- Action (BUY CE / BUY PE) per underlying
-- Strike, expiry, spot price, India VIX at time of signal
-- Trigger label (MA crossover / RSI reversal)
-- Stop-loss %, target %, risk amount, lot size
-- Conflict detection: if both CE and PE signals fire on the same underlying, they are
-  highlighted with source strategy labels so you can make an informed decision
+**Setup:**
 
-### Setup
-
-1. Create a Telegram bot via [@BotFather](https://t.me/BotFather) and get your bot token
+1. Create a bot via [@BotFather](https://t.me/BotFather), get the token
 2. Get your chat ID from [@userinfobot](https://t.me/userinfobot)
-3. Add both as GitHub repository secrets:
-   - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_CHAT_ID`
-
-### Run manually
+3. Add as GitHub repository secrets: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
 
 ```bash
-export TELEGRAM_BOT_TOKEN=your_token
-export TELEGRAM_CHAT_ID=your_chat_id
+# Run manually
+set TELEGRAM_BOT_TOKEN=your_token
+set TELEGRAM_CHAT_ID=your_chat_id
 python src/telegram_notify.py
 ```
 
@@ -238,37 +328,144 @@ python src/telegram_notify.py
 
 ## Configuration
 
-All parameters are in `config.py`. These are the key ones:
+All parameters live in `config.py`. Key settings:
 
-| Parameter              | Default          | Description                                  |
-|------------------------|------------------|----------------------------------------------|
-| `BACKTEST_START`       | 2015-01-01       | Backtest start date                          |
-| `BACKTEST_END`         | today            | Backtest end date                            |
-| `STARTING_CAPITAL`     | ₹5,00,000        | Initial capital                              |
-| `RISK_PER_TRADE_PCT`   | 2%               | Capital at risk per trade                    |
-| `MAX_OPEN_POSITIONS`   | 5                | Max concurrent positions                     |
-| `MAX_LOTS_PER_TRADE`   | 10               | Hard cap on lots per single trade            |
-| `MAX_DRAWDOWN_HALT_PCT`| 15%              | Halt new trades if drawdown exceeds this     |
-| `BUY_STOP_LOSS_PCT`    | 40%              | Stop loss for long options (% of premium)    |
-| `BUY_TARGET_PCT`       | 200%             | Profit target for long options               |
-| `SELL_STOP_LOSS_PCT`   | 100%             | Stop loss for short options                  |
-| `SELL_TARGET_PCT`      | 50%              | Profit target for short options              |
-| `SLIPPAGE_PCT`         | 1.5%             | Slippage assumption on entry and exit        |
-| `RISK_FREE_RATE`       | 6.5%             | Annualised risk-free rate (91-day T-bill)    |
-| `DAYS_BEFORE_EXPIRY_EXIT` | 1            | Close positions N days before expiry        |
-| `TREND_FAST_MA`        | 25               | Fast MA period for trend strategy            |
-| `TREND_SLOW_MA`        | 75               | Slow MA period for trend strategy            |
-| `RSI_PERIOD`           | 14               | RSI calculation period                       |
-| `RSI_OVERSOLD`         | 25               | RSI level to buy CE (oversold reversal)      |
-| `RSI_OVERBOUGHT`       | 65               | RSI level to buy PE (overbought reversal)    |
-| `RSI_CONFIRM_BARS`     | 1                | Bars RSI must hold past threshold            |
-| `RSI_TIME_STOP_DAYS`   | 10               | Exit RSI trades if no profit within N days   |
-| `BHAVCOPY_FOLDER`      | data/bhavcopy    | Folder containing NSE bhavcopy ZIPs          |
-| `BHAVCOPY_SYMBOL`      | NIFTY            | NSE symbol to filter from bhavcopy files     |
-| `UNDERLYINGS`          | ^NSEI, ^NSEBANK, NIFTY_FIN_SERVICE.NS | Tickers to trade   |
+### Capital & Risk
 
-After running `python main.py optimize`, the best-found parameters are automatically written
-back to `config.py` and a diff is printed showing what changed.
+| Parameter               | Default    | Description                                      |
+|-------------------------|------------|--------------------------------------------------|
+| `STARTING_CAPITAL`      | ₹5,00,000  | Initial capital                                  |
+| `RISK_PER_TRADE_PCT`    | 2%         | Capital at risk per trade                        |
+| `MAX_OPEN_POSITIONS`    | 5          | Max concurrent open trades                       |
+| `MAX_LOTS_PER_TRADE`    | 10         | Hard cap on lots per trade                       |
+| `MAX_DRAWDOWN_HALT_PCT` | 15%        | Halt new trades if drawdown exceeds this         |
+
+### Options & Execution
+
+| Parameter                  | Default | Description                                   |
+|----------------------------|---------|-----------------------------------------------|
+| `BUY_STOP_LOSS_PCT`        | 40%     | Exit long if premium falls this much          |
+| `BUY_TARGET_PCT`           | 200%    | Exit long if premium doubles (200%)           |
+| `SELL_STOP_LOSS_PCT`       | 100%    | Exit short if premium hits 2× received        |
+| `SELL_TARGET_PCT`          | 50%     | Exit short if premium decays 50%              |
+| `SLIPPAGE_PCT`             | 1.5%    | Adverse slippage on entry and exit            |
+| `RISK_FREE_RATE`           | 6.5%    | Annualised (91-day T-bill proxy)              |
+| `DAYS_BEFORE_EXPIRY_EXIT`  | 1       | Close all positions N days before expiry      |
+
+### Strategy Parameters
+
+| Parameter               | Default | Description                                       |
+|-------------------------|---------|---------------------------------------------------|
+| `TREND_FAST_MA`         | 25      | Fast MA period                                    |
+| `TREND_SLOW_MA`         | 75      | Slow MA period                                    |
+| `RSI_PERIOD`            | 14      | RSI calculation period                            |
+| `RSI_OVERSOLD`          | 25      | Buy CE when RSI recovers above this               |
+| `RSI_OVERBOUGHT`        | 65      | Buy PE when RSI rolls below this                  |
+| `MR_IV_PERCENTILE_ENTRY`| 70      | Short strangle entry IV percentile                |
+| `MR_IV_PERCENTILE_EXIT` | 30      | Short strangle exit IV percentile                 |
+| `ORB_BREAKOUT_PCT`      | 0.5%    | Close must be this % above/below open             |
+| `ORB_GAP_MAX_PCT`       | 1.5%    | Skip if open gapped more than this from prev close|
+| `STRADDLE_IV_ENTRY_PCT` | 30      | Buy straddle when IV percentile ≤ this            |
+| `STRADDLE_IV_EXIT_PCT`  | 60      | Exit straddle when IV percentile ≥ this           |
+| `VWAP_WINDOW`           | 20      | Rolling bars for VWAP calculation                 |
+| `VWAP_STD_MULT`         | 1.5     | Standard deviation multiplier for VWAP bands      |
+| `GAP_MIN_PCT`           | 0.5%    | Minimum gap % to consider fading                  |
+| `GAP_MAX_PCT`           | 2.0%    | Maximum gap % — above this is news, don't fade    |
+| `IC_IV_ENTRY_PCT`       | 60      | Iron condor entry IV percentile                   |
+| `IC_BODY_DELTA`         | 0.25    | Delta for short body strikes                      |
+| `IC_WING_DELTA`         | 0.10    | Delta for long wing strikes                       |
+| `IC_ADX_CHOPPY_THRESHOLD`| 22.0   | Only enter iron condor when ADX < this (chop)     |
+
+### Data
+
+| Parameter          | Default                                    | Description                  |
+|--------------------|--------------------------------------------|------------------------------|
+| `BHAVCOPY_FOLDER`  | `data/bhavcopy`                            | NSE bhavcopy ZIP folder      |
+| `BHAVCOPY_SYMBOL`  | `NIFTY`                                    | Symbol filter in bhavcopy    |
+| `UNDERLYINGS`      | `^NSEI`, `^NSEBANK`, `NIFTY_FIN_SERVICE.NS`| Tickers to trade             |
+
+---
+
+## Performance Metrics
+
+Every backtest, optimizer run, and explorer result reports these metrics:
+
+| Metric               | Description                                                   |
+|----------------------|---------------------------------------------------------------|
+| Total Trades         | Number of closed trades                                       |
+| Win Rate %           | % of trades with positive P&L                                |
+| Total Return %       | Overall return on starting capital                            |
+| CAGR %               | Compound Annual Growth Rate                                   |
+| Avg / Median Trade % | Mean and median return per trade                              |
+| Best / Worst Trade % | Single best and worst trade                                   |
+| Avg Win / Avg Loss % | Mean return of winning and losing trades                      |
+| Profit Factor        | Gross wins ÷ gross losses (>1.0 = profitable overall)        |
+| Sharpe per Trade     | Mean trade return ÷ std dev of all trade returns              |
+| Sortino per Trade    | Mean trade return ÷ std dev of losing trades (downside only)  |
+| Max Drawdown %       | Largest peak-to-trough equity decline                         |
+| Avg Held Days        | Average trade duration in calendar days                       |
+| Avg Entry Delta      | Mean absolute delta of options at entry                       |
+| Avg Theta %/day      | Mean daily theta decay as % of premium paid                   |
+
+---
+
+## HTML Dashboard Report
+
+Every backtest saves a self-contained HTML report to `reports/`. Sections:
+
+- **Summary cards** — all metrics, color-coded green/red
+- **Equity curve** — interactive Plotly chart with drawdown shading
+- **Monthly returns heatmap** — calendar grid of monthly P&L %
+- **Trade log table** — sortable, filterable, paginated, green/red rows
+- **Win/Loss distribution** — histogram with avg win/loss lines
+- **Trade P&L bar chart** — per-trade bars with cumulative P&L line
+- **Strategy parameters panel** — all config values embedded for reproducibility
+
+All JS, CSS, and Plotly data is embedded inline — no internet required to open.
+
+---
+
+## Adding a New Strategy
+
+1. Create `src/strategies/my_strategy.py`
+2. Inherit from `BaseStrategy`, implement `name` property and `generate_signals(data, vix, current_date)`
+3. Return a list of `Signal` objects (entry or exit)
+4. Register in `get_strategy()` in `main.py` and `_build_registry()` in `strategy_explorer.py`
+5. Add config defaults to `config.py`
+6. Export from `src/strategies/__init__.py`
+
+**Signal schema:**
+
+```python
+Signal(
+    date        = current_date,       # date of signal
+    underlying  = "^NSEI",            # Yahoo Finance ticker
+    direction   = "long",             # "long" (buy option) | "short" (sell option)
+    option_type = "CE",               # "CE" | "PE"
+    strike      = 0.0,                # 0 = ATM; backtester resolves it
+    expiry      = next_expiry(...),   # expiry date
+    signal_type = "entry",            # "entry" | "exit"
+    meta        = {"trigger": "..."}  # any metadata for reports
+)
+```
+
+For multi-leg strategies (straddle, iron condor): emit multiple `Signal` objects in one
+`generate_signals()` call. The backtester handles each as an independent `Trade`.
+
+---
+
+## Brokerage & Tax Model
+
+All P&L deducts real transaction costs (Groww flat-fee model):
+
+| Cost             | Rate                                           |
+|------------------|------------------------------------------------|
+| Brokerage        | ₹20 flat per order (or 0.05%, whichever lower) |
+| STT              | 0.125% on sell side (options)                  |
+| Exchange charges | 0.053% of premium                              |
+| GST              | 18% on brokerage + exchange charges            |
+| SEBI charges     | ₹10 per crore turnover                         |
+| Stamp duty       | 0.003% on buy side                             |
 
 ---
 
@@ -276,113 +473,54 @@ back to `config.py` and a diff is printed showing what changed.
 
 ```
 algo-trading/
-├── main.py                        # CLI entry point
-├── config.py                      # All parameters
-├── requirements.txt               # Dependencies
+├── main.py                          # CLI entry point
+├── strategy_explorer.py             # Strategy combination tester & ranker
+├── config.py                        # All parameters
+├── requirements.txt                 # Python dependencies
 ├── src/
-│   ├── data_ingestion.py          # yfinance data fetching + bhavcopy loader + ChainLookup
-│   ├── options_pricing.py         # Black-Scholes pricing + Greeks + expiry helpers
-│   ├── backtester.py              # Core event-driven backtest engine
-│   ├── risk_manager.py            # Position sizing + SL/target rules + drawdown gating
-│   ├── reporter.py                # 20+ performance metrics + console summary
-│   ├── html_report.py             # HTML dashboard generator (Jinja2 + Plotly)
-│   ├── optimizer.py               # Level 1: Grid search (16x speedup via signal replay)
-│   ├── walk_forward.py            # Level 2: Walk-forward validation with overfitting detection
-│   ├── bhavcopy_downloader.py     # NSE bhavcopy file downloader
-│   ├── telegram_notify.py         # Daily signal delivery via Telegram Bot API
+│   ├── data_ingestion.py            # yfinance fetching + bhavcopy loader + ChainLookup
+│   ├── options_pricing.py           # Black-Scholes pricing + Greeks + expiry helpers
+│   ├── backtester.py                # Core event-driven backtest engine
+│   ├── risk_manager.py              # Position sizing + SL/target + drawdown gating
+│   ├── reporter.py                  # 15+ performance metrics + console summary
+│   ├── html_report.py               # HTML dashboard generator (Jinja2 + Plotly)
+│   ├── optimizer.py                 # Level 1: Grid search (16× speedup via replay)
+│   ├── walk_forward.py              # Level 2: Walk-forward with overfitting detection
+│   ├── bhavcopy_downloader.py       # NSE bhavcopy downloader
+│   ├── telegram_notify.py           # Daily signals via Telegram Bot API
 │   └── strategies/
-│       ├── base_strategy.py       # Abstract base class + Signal dataclass
-│       ├── trend_following.py     # MA Crossover (ADX, confirm, direction, time-stop filters)
-│       ├── rsi_strategy.py        # RSI Reversal (Wilder smoothing, confirmation)
-│       ├── combined_strategy.py   # Meta-strategy: merges signals from N strategies
-│       └── mean_reversion.py      # Short Strangle on High IV percentile
+│       ├── base_strategy.py         # Abstract base class + Signal dataclass
+│       ├── combined_strategy.py     # Meta: merges signals from N child strategies
+│       ├── inverse_strategy.py      # Meta: flips CE↔PE on any strategy
+│       ├── trend_following.py       # MA Crossover (ADX, confirm, direction, time-stop)
+│       ├── rsi_strategy.py          # RSI Reversal (Wilder smoothing)
+│       ├── confluence_strategy.py   # MA + RSI Agreement (both must confirm)
+│       ├── mean_reversion.py        # Short Strangle on High IV percentile
+│       ├── bollinger_band_strategy.py # BB reversion with VIX regime filter
+│       ├── orb_strategy.py          # Opening Range Breakout (daily proxy)
+│       ├── long_straddle.py         # Long Straddle/Strangle on Low IV
+│       ├── vwap_reversion.py        # VWAP ± σ-band reversion or breakout
+│       ├── gap_fade.py              # Fade opening gaps with no follow-through
+│       └── iron_condor.py           # Delta-neutral Iron Condor (chop regime)
 ├── templates/
-│   └── report_template.html       # Jinja2 HTML template for reports
+│   └── report_template.html         # Jinja2 HTML template
 ├── .github/
 │   └── workflows/
-│       └── daily_signals.yml      # GitHub Actions: daily Telegram signal delivery
+│       └── daily_signals.yml        # GitHub Actions: daily Telegram delivery
 ├── data/
-│   ├── bhavcopy/                  # NSE F&O bhavcopy ZIP files (2,300+ files)
-│   ├── cache/                     # Intermediate data cache
-│   ├── options/                   # Options data
-│   └── raw/                       # Downloaded OHLCV CSVs (^NSEI, ^NSEBANK, ^INDIAVIX)
-├── reports/                       # HTML reports, trade CSVs, optimization results
-└── signals/                       # Daily signal output files
+│   ├── bhavcopy/                    # NSE F&O bhavcopy ZIP files (~2,300 files)
+│   ├── cache/                       # Intermediate data cache
+│   └── raw/                         # Downloaded OHLCV CSVs
+├── reports/                         # HTML reports, trade CSVs, explorer/optimizer results
+└── signals/                         # Daily signal output files
 ```
 
 ---
 
-## Performance Metrics
+## Disclaimer
 
-Every backtest and optimization run reports these metrics:
-
-| Metric              | Description                                              |
-|---------------------|----------------------------------------------------------|
-| Total Trades        | Number of closed trades                                  |
-| Win Rate %          | % of trades with positive P&L                           |
-| Total Return %      | Overall return on starting capital                       |
-| CAGR %              | Compound Annual Growth Rate                              |
-| Avg Trade %         | Mean return per trade                                    |
-| Median Trade %      | Median return per trade                                  |
-| Best / Worst Trade  | Single best and worst trade returns                      |
-| Avg Win / Avg Loss  | Mean return of winning and losing trades                 |
-| Profit Factor       | Gross wins / gross losses (>1.0 = profitable)            |
-| Sharpe per Trade    | Mean trade return / std dev of trade returns             |
-| Sortino per Trade   | Mean return / std dev of losing trades (downside only)   |
-| Max Drawdown %      | Largest peak-to-trough equity decline                    |
-| Avg Held Days       | Average trade duration in calendar days                  |
-| Avg Entry Delta     | Mean absolute delta of options at entry                  |
-| Avg Theta %/day     | Mean daily theta decay as % of premium paid              |
-
----
-
-## HTML Dashboard Report
-
-After every backtest, a self-contained HTML report is saved to `reports/`. Sections:
-
-- **Summary header** — all metrics as a card grid, color-coded
-- **Equity curve** — interactive Plotly chart with drawdown shading
-- **Monthly returns heatmap** — calendar grid of monthly P&L %
-- **Trade log table** — sortable/filterable, paginated, green/red rows
-- **Win/Loss distribution** — histogram with avg win/loss lines
-- **Trade P&L bar chart** — per-trade bars with cumulative P&L overlay
-- **Strategy parameters panel** — all config values used, embedded for reproducibility
-
-All JS/CSS/Plotly data is embedded inline — no internet required to open.
-
----
-
-## Adding a New Strategy
-
-1. Create `src/strategies/my_strategy.py`
-2. Inherit from `BaseStrategy`
-3. Implement the `name` property and `generate_signals(data, vix, current_date)` method
-4. Return a list of `Signal` objects (entry or exit)
-5. Register it in the `get_strategy()` factory in `main.py`
-
-To include it in optimization, update the `_run_signal_backtest()` function in `src/optimizer.py`.
-
----
-
-## Brokerage & Tax Model
-
-All P&L calculations deduct real transaction costs using Groww's flat-fee model:
-
-| Cost              | Rate                                       |
-|-------------------|--------------------------------------------|
-| Brokerage         | ₹20 flat per order (or 0.05%, whichever lower) |
-| STT               | 0.125% on sell side (options)              |
-| Exchange charges  | 0.053% of premium                          |
-| GST               | 18% on brokerage + exchange charges        |
-| SEBI charges      | ₹10 per crore turnover                     |
-| Stamp duty        | 0.003% on buy side                         |
-
----
-
-## Important Disclaimer
-
-- Options pricing falls back to Black-Scholes with India VIX as IV proxy when bhavcopy data
-  is unavailable for a given date
+- Options pricing falls back to Black-Scholes with India VIX as IV proxy when bhavcopy is
+  unavailable for a given date
 - Backtest results are indicative only — not a guarantee of future performance
 - This is not financial advice. All trades are your own decision
 - Groww has no trading API — all signals must be executed manually

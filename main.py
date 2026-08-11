@@ -9,8 +9,35 @@ Usage
   # Run a backtest with mean reversion strategy
   python main.py backtest --strategy mean_rev --ticker ^NSEI
 
+  # Run Bollinger Band mean reversion strategy
+  python main.py backtest --strategy bb --ticker ^NSEI
+
+  # Run confluence strategy (MA crossover + RSI agreement)
+  python main.py backtest --strategy confluence --ticker ^NSEI
+
+  # Opening Range Breakout (daily proxy)
+  python main.py backtest --strategy orb --ticker ^NSEI
+
+  # Long Straddle — buy vol on low-IV days
+  python main.py backtest --strategy straddle --ticker ^NSEI
+
+  # Long Strangle — OTM version of straddle
+  python main.py backtest --strategy strangle --ticker ^NSEI
+
+  # VWAP Reversion — fade VWAP band extensions
+  python main.py backtest --strategy vwap_rev --ticker ^NSEI
+
+  # VWAP Breakout — follow VWAP band breaks
+  python main.py backtest --strategy vwap_brk --ticker ^NSEI
+
+  # Gap Fade — fade opening gaps with no follow-through
+  python main.py backtest --strategy gap_fade --ticker ^NSEI
+
+  # Iron Condor — delta-neutral income on choppy days
+  python main.py backtest --strategy iron_condor --ticker ^NSEI
+
   # Generate today's signals (after backtest has run)
-  python main.py signals --strategy trend --ticker ^NSEI
+  python main.py signals --strategy combined --ticker ^NSEI
 
   # Refresh data cache
   python main.py fetch --ticker ^NSEI --ticker ^NSEBANK
@@ -43,6 +70,14 @@ from src.strategies.trend_following import TrendFollowingStrategy
 from src.strategies.rsi_strategy import RSIStrategy
 from src.strategies.combined_strategy import CombinedStrategy
 from src.strategies.mean_reversion import MeanReversionStrategy
+from src.strategies.bollinger_band_strategy import BollingerBandStrategy
+from src.strategies.confluence_strategy import ConfluenceStrategy
+from src.strategies.inverse_strategy import InverseStrategy
+from src.strategies.orb_strategy import ORBStrategy
+from src.strategies.long_straddle import LongStraddleStrategy
+from src.strategies.vwap_reversion import VWAPReversionStrategy
+from src.strategies.gap_fade import GapFadeStrategy
+from src.strategies.iron_condor import IronCondorStrategy
 from src.bhavcopy_downloader import download_range, download_last_n_days, verify_downloads
 
 
@@ -103,8 +138,93 @@ def get_strategy(name: str):
                 weekly         = True,
             ),
         ]),
-        "mean_rev" : MeanReversionStrategy(),
+        "mean_rev"   : MeanReversionStrategy(),
+        "bb"         : BollingerBandStrategy(
+            bb_period        = config.BB_PERIOD,
+            bb_std           = config.BB_STD_MULT,
+            atr_period       = config.BB_ATR_PERIOD,
+            use_trend_filter = config.BB_USE_TREND_FILTER,
+            vix_min          = config.BB_VIX_MIN,
+            vix_max          = config.BB_VIX_MAX,
+            confirm_bars     = config.BB_CONFIRM_BARS,
+            time_stop_days   = config.BB_TIME_STOP_DAYS,
+            weekly           = True,
+        ),
+        "confluence" : ConfluenceStrategy(
+            fast_ma          = config.TREND_FAST_MA,
+            slow_ma          = config.TREND_SLOW_MA,
+            rsi_period       = config.RSI_PERIOD,
+            rsi_oversold     = config.RSI_OVERSOLD,
+            rsi_overbought   = config.RSI_OVERBOUGHT,
+            rsi_lookback     = config.CONFLUENCE_RSI_LOOKBACK,
+            rsi_entry_max    = config.CONFLUENCE_RSI_ENTRY_MAX,
+            rsi_entry_min    = config.CONFLUENCE_RSI_ENTRY_MIN,
+            use_trend_filter = config.CONFLUENCE_USE_TREND_FILTER,
+            vix_min          = config.BB_VIX_MIN,
+            vix_max          = config.BB_VIX_MAX,
+            time_stop_days   = config.CONFLUENCE_TIME_STOP_DAYS,
+            weekly           = True,
+        ),
+        # ── New strategies ────────────────────────────────────────
+        "orb"        : ORBStrategy(
+            breakout_pct   = config.ORB_BREAKOUT_PCT,
+            gap_max_pct    = config.ORB_GAP_MAX_PCT,
+            use_adx_filter = config.ORB_USE_ADX_FILTER,
+            adx_threshold  = config.ORB_ADX_THRESHOLD,
+            time_stop_days = config.ORB_TIME_STOP_DAYS,
+            weekly         = True,
+        ),
+        "straddle"   : LongStraddleStrategy(
+            iv_entry_pct   = config.STRADDLE_IV_ENTRY_PCT,
+            iv_exit_pct    = config.STRADDLE_IV_EXIT_PCT,
+            otm_delta      = 0.0,  # ATM straddle
+            time_stop_days = config.STRADDLE_TIME_STOP_DAYS,
+            weekly         = True,
+        ),
+        "strangle"   : LongStraddleStrategy(
+            iv_entry_pct   = config.STRADDLE_IV_ENTRY_PCT,
+            iv_exit_pct    = config.STRADDLE_IV_EXIT_PCT,
+            otm_delta      = config.STRADDLE_OTM_DELTA if config.STRADDLE_OTM_DELTA > 0 else 0.25,
+            time_stop_days = config.STRADDLE_TIME_STOP_DAYS,
+            weekly         = True,
+        ),
+        "vwap_rev"   : VWAPReversionStrategy(
+            vwap_window    = config.VWAP_WINDOW,
+            std_mult       = config.VWAP_STD_MULT,
+            mode           = "reversion",
+            time_stop_days = config.VWAP_TIME_STOP_DAYS,
+            weekly         = True,
+        ),
+        "vwap_brk"   : VWAPReversionStrategy(
+            vwap_window    = config.VWAP_WINDOW,
+            std_mult       = config.VWAP_STD_MULT,
+            mode           = "breakout",
+            time_stop_days = config.VWAP_TIME_STOP_DAYS,
+            weekly         = True,
+        ),
+        "gap_fade"   : GapFadeStrategy(
+            gap_min_pct       = config.GAP_MIN_PCT,
+            gap_max_pct       = config.GAP_MAX_PCT,
+            require_no_follow = config.GAP_REQUIRE_NO_FOLLOW,
+            trend_filter      = config.GAP_TREND_FILTER,
+            time_stop_days    = config.GAP_TIME_STOP_DAYS,
+            weekly            = True,
+        ),
+        "iron_condor": IronCondorStrategy(
+            iv_entry_pct         = config.IC_IV_ENTRY_PCT,
+            iv_exit_pct          = config.IC_IV_EXIT_PCT,
+            body_delta           = config.IC_BODY_DELTA,
+            wing_delta           = config.IC_WING_DELTA,
+            use_adx_filter       = config.IC_USE_ADX_FILTER,
+            adx_choppy_threshold = config.IC_ADX_CHOPPY_THRESHOLD,
+            time_stop_days       = config.IC_TIME_STOP_DAYS,
+            weekly               = False,  # monthly for more theta
+        ),
     }
+
+    # ── Inverse variants — wrap any strategy to flip CE↔PE ───────
+    for _key in list(strategies.keys()):
+        strategies[f"inv_{_key}"] = InverseStrategy(strategies[_key])
     if name not in strategies:
         print(f"Unknown strategy '{name}'. Available: {list(strategies.keys())}")
         sys.exit(1)
@@ -174,43 +294,17 @@ def cmd_backtest(args):
 
 
 def cmd_signals(args):
-    """Generate today's trading signals."""
-    tickers = args.ticker or config.UNDERLYINGS
-    logger.info(f"Generating signals: {args.strategy} on {tickers}")
+    """Generate today's trading signals and print to console."""
+    from src.telegram_notify import generate_signal_message
 
-    # Use a small recent window for signal generation
-    from datetime import timedelta
-    end   = date.today()
-    start = end - timedelta(days=365)
+    strategy = get_strategy(args.strategy) if args.strategy != "combined" else None
 
-    data = get_combined_dataset(start=start, end=end, force_refresh=True)
-    data = {k: v for k, v in data.items() if k in tickers}
+    print("\nGenerating signals...\n")
+    msg = generate_signal_message(strategy=strategy)
 
-    strategy = get_strategy(args.strategy)
-    signals_out = []
-
-    for ticker, df in data.items():
-        df.attrs["ticker"] = ticker
-        vix = df.get("VIX", None)
-        if vix is None:
-            continue
-
-        sigs = strategy.generate_signals(df, vix, end)
-        for sig in sigs:
-            if sig.signal_type != "entry":
-                continue
-            spot  = float(df["Close"].iloc[-1])
-            print(f"\n{'─'*60}")
-            print(f"  ACTION     : {'BUY' if sig.direction == 'long' else 'SELL'} {sig.option_type}")
-            print(f"  Underlying : {ticker}")
-            print(f"  Spot       : ₹{spot:,.2f}")
-            print(f"  Strike     : ATM ≈ ₹{round(spot/50)*50:,.0f}")
-            print(f"  Expiry     : {sig.expiry}")
-            print(f"  Meta       : {sig.meta}")
-
-    print(f"\n{'─'*60}")
-    print("  Run above trades manually on Groww before market open.")
-    print(f"{'─'*60}\n")
+    # Strip HTML tags for clean console output
+    import re
+    print(re.sub(r"<[^>]+>", "", msg))
 
 
 def cmd_fetch(args):
@@ -293,7 +387,10 @@ def main():
     # backtest
     bt_parser = sub.add_parser("backtest", help="Run backtest and generate report")
     bt_parser.add_argument("--strategy", default="combined",
-                           help="Strategy: trend | rsi | combined | mean_rev (default: combined)")
+                           help="Strategy: trend | rsi | combined | mean_rev | bb | confluence"
+                                " | orb | straddle | strangle | vwap_rev | vwap_brk"
+                                " | gap_fade | iron_condor"
+                                " | inv_<any> to invert (default: combined)")
     bt_parser.add_argument("--ticker", action="append",
                            help="Ticker(s) to trade (default: all in config)")
     bt_parser.add_argument("--refresh", action="store_true",
