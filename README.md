@@ -287,17 +287,106 @@ Output: `reports/walk_forward_results_YYYY-MM-DD.csv`
 
 ---
 
-## NSE Stock Screener
+## NSE Stock Screener (Optimized Architecture)
 
-Find NSE stocks matching one or more predefined screening strategies using hybrid data sources
-(Screener.in primary + yfinance fallback).
+**NEW (August 2026):** The screener now uses a **two-workflow architecture** for 140-420× speedup:
+
+1. **Monthly Heavy Lifting:** `scripts/update_fundamentals.py` caches fundamental metrics to `data/fundamentals.csv`
+2. **Biweekly Fast Screening:** `main.py screen` reads cache + bulk fetches prices (~10-30 seconds)
+
+### How It Works
+
+```
+Workflow 1: Monthly (1st of month, 00:00 UTC)
+├─ Fetch fundamentals from Screener.in (cached for 25 days)
+├─ Fallback to yfinance for missing metrics
+└─ Save to data/fundamentals.csv → commit to git
+
+Workflow 2: Biweekly (1st & 15th, 12:30 UTC)
+├─ Load data/fundamentals.csv (cached)
+├─ Bulk fetch current prices in single yf.download() call
+├─ Compute dynamic P/E = price / eps (real-time)
+├─ Compute dynamic P/B = price / book_value (real-time)
+├─ Apply strategy rules (filter + rank)
+└─ Save results to reports/screen_*.csv
+```
+
+**Performance Comparison:**
+
+| Metric | Old | New | Improvement |
+|--------|-----|-----|------------|
+| Screener.in calls | 2,404/run | 0/biweekly | ∞ (moved to monthly) |
+| Time per screening | 70 min | 10-30 sec | **140-420× faster** |
+| Rate-limiting delays | 70 min | 0 sec | Eliminated |
+| Cache approach | None | 25-day fundamentals | Full data reuse |
+
+### Setup: Generate Initial Fundamentals Cache
+
+**First time only: Generate the fundamentals cache (2,404 NSE stocks)**
 
 ```bash
-# Single strategy, single ticker
-python main.py screen --strategy cheap_to_moon --ticker RELIANCE.NS
+# Build full CSV for all 2,404 tickers (~30-60 minutes)
+# This fetches real market data from yfinance
+python build_full_csv.py
 
-# Multiple tickers with same strategy
-python main.py screen --strategy multibagger --ticker TECHM.NS --ticker SUNPHARMA.NS --ticker MARUTI.NS
+# Once complete, fundamentals are cached in data/fundamentals.csv
+# Subsequent screening runs use this cache (no re-fetching needed)
+```
+
+**Alternative (if you already have Screener.in data):**
+
+```bash
+# Update using Screener.in + yfinance fallback (~80 minutes first time, ~10 min after)
+python scripts/update_fundamentals.py
+
+# Or force refresh (skip cache check):
+python scripts/update_fundamentals.py --force
+
+# Test with first 50 tickers:
+python scripts/update_fundamentals.py --limit 50
+```
+
+Creates `data/fundamentals.csv` with all metrics needed for screening.
+
+### Run Screening
+
+```bash
+# Single strategy, all 2,404 NSE stocks (~15-30 seconds)
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt
+
+# Multiple strategies (batched against same cached data):
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt
+python main.py screen --strategy multibagger --universe nse_tickers_template.txt
+
+# Single tickers (instant):
+python main.py screen --strategy multibagger --ticker TECHM.NS --ticker SUNPHARMA.NS
+
+# Results saved to:
+# reports/screen_cheap_to_moon_YYYY-MM-DD.csv
+# reports/screen_multibagger_YYYY-MM-DD.csv
+```
+
+### CLI Reference
+
+**Update Fundamentals:**
+```bash
+python scripts/update_fundamentals.py                       # Normal: skip fresh
+python scripts/update_fundamentals.py --force               # Update all (takes ~80 min)
+python scripts/update_fundamentals.py --universe custom.txt # Custom ticker file
+python scripts/update_fundamentals.py --limit 100           # Test: first 100 only
+python scripts/update_fundamentals.py --force --limit 50    # Combine flags
+```
+
+**Run Screening:**
+```bash
+python main.py screen --strategy cheap_to_moon \
+  --universe nse_tickers_template.txt
+
+python main.py screen --strategy multibagger \
+  --universe nse_tickers_template.txt
+
+# --max-workers flag kept for compatibility (not used in new architecture)
+```
 
 # Bulk screen from universe file (all 2,404 NSE stocks)
 python main.py screen --strategy multibagger --universe nse_tickers_template.txt
