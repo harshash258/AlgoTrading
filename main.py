@@ -54,32 +54,29 @@ Usage
 
 import argparse
 import logging
-import sys
 import os
+import re
+import sys
 from datetime import date
 
-# ── Setup path ───────────────────────────────────────────────────
+# ── Ensure workspace / src in path ───────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
 import config
-from src.data_ingestion import get_combined_dataset, fetch_all_underlyings
-from src.backtester import Backtester
-from src.reporter import compute_metrics, trades_to_dataframe, print_summary
-from src.html_report import generate_html_report
-from src.strategies.trend_following import TrendFollowingStrategy
-from src.strategies.rsi_strategy import RSIStrategy
-from src.strategies.combined_strategy import CombinedStrategy
-from src.strategies.mean_reversion import MeanReversionStrategy
-from src.strategies.bollinger_band_strategy import BollingerBandStrategy
-from src.strategies.confluence_strategy import ConfluenceStrategy
-from src.strategies.inverse_strategy import InverseStrategy
-from src.strategies.orb_strategy import ORBStrategy
-from src.strategies.long_straddle import LongStraddleStrategy
-from src.strategies.vwap_reversion import VWAPReversionStrategy
-from src.strategies.gap_fade import GapFadeStrategy
-from src.strategies.iron_condor import IronCondorStrategy
-from src.bhavcopy_downloader import download_range, download_last_n_days, verify_downloads
-
+from algo_trading.core.backtester import Backtester
+from algo_trading.data.ingestion import get_combined_dataset, fetch_all_underlyings
+from algo_trading.data.bhavcopy import download_range, download_last_n_days, verify_downloads
+from algo_trading.reporting.metrics import compute_metrics, trades_to_dataframe, print_summary
+from algo_trading.reporting.html_generator import generate_html_report
+from algo_trading.strategies import (
+    get_strategy as registry_get_strategy,
+    list_strategies,
+    InverseStrategy,
+    CombinedStrategy,
+    TrendFollowingStrategy,
+    RSIStrategy,
+)
 
 # ── Logging ──────────────────────────────────────────────────────
 logging.basicConfig(
@@ -92,35 +89,21 @@ logger = logging.getLogger(__name__)
 
 # ── Strategy factory ─────────────────────────────────────────────
 def get_strategy(name: str):
-    _trend = TrendFollowingStrategy(
-        fast_ma              = config.TREND_FAST_MA,
-        slow_ma              = config.TREND_SLOW_MA,
-        use_adx_filter       = False,
-        use_confirm          = False,
-        use_direction_filter = False,
-        use_time_stop        = False,
-    )
-    _rsi = RSIStrategy(
-        rsi_period     = config.RSI_PERIOD,
-        oversold       = config.RSI_OVERSOLD,
-        overbought     = config.RSI_OVERBOUGHT,
-        confirm_bars   = config.RSI_CONFIRM_BARS,
-        time_stop_days = config.RSI_TIME_STOP_DAYS,
-        weekly         = True,
-    )
-
-    strategies = {
-        "trend"    : _trend,
-        "trend_raw": TrendFollowingStrategy(
-            fast_ma              = config.TREND_FAST_MA,
-            slow_ma              = config.TREND_SLOW_MA,
-            use_adx_filter       = False,
-            use_confirm          = False,
-            use_direction_filter = False,
-            use_time_stop        = False,
-        ),
-        "rsi"      : _rsi,
-        "combined" : CombinedStrategy([
+    """
+    Look up strategy from the central registry, with support for
+    inversion prefixes (`inv_<name>`) and legacy custom combined instances.
+    """
+    name_clean = name.strip().lower()
+    
+    # Check for inverse wrapper
+    if name_clean.startswith("inv_"):
+        base_name = name_clean[4:]
+        base_strat = get_strategy(base_name)
+        return InverseStrategy(base_strat)
+    
+    # Custom combined with default components
+    if name_clean == "combined":
+        return CombinedStrategy([
             TrendFollowingStrategy(
                 fast_ma              = config.TREND_FAST_MA,
                 slow_ma              = config.TREND_SLOW_MA,
@@ -137,98 +120,13 @@ def get_strategy(name: str):
                 time_stop_days = config.RSI_TIME_STOP_DAYS,
                 weekly         = True,
             ),
-        ]),
-        "mean_rev"   : MeanReversionStrategy(),
-        "bb"         : BollingerBandStrategy(
-            bb_period        = config.BB_PERIOD,
-            bb_std           = config.BB_STD_MULT,
-            atr_period       = config.BB_ATR_PERIOD,
-            use_trend_filter = config.BB_USE_TREND_FILTER,
-            vix_min          = config.BB_VIX_MIN,
-            vix_max          = config.BB_VIX_MAX,
-            confirm_bars     = config.BB_CONFIRM_BARS,
-            time_stop_days   = config.BB_TIME_STOP_DAYS,
-            weekly           = True,
-        ),
-        "confluence" : ConfluenceStrategy(
-            fast_ma          = config.TREND_FAST_MA,
-            slow_ma          = config.TREND_SLOW_MA,
-            rsi_period       = config.RSI_PERIOD,
-            rsi_oversold     = config.RSI_OVERSOLD,
-            rsi_overbought   = config.RSI_OVERBOUGHT,
-            rsi_lookback     = config.CONFLUENCE_RSI_LOOKBACK,
-            rsi_entry_max    = config.CONFLUENCE_RSI_ENTRY_MAX,
-            rsi_entry_min    = config.CONFLUENCE_RSI_ENTRY_MIN,
-            use_trend_filter = config.CONFLUENCE_USE_TREND_FILTER,
-            vix_min          = config.BB_VIX_MIN,
-            vix_max          = config.BB_VIX_MAX,
-            time_stop_days   = config.CONFLUENCE_TIME_STOP_DAYS,
-            weekly           = True,
-        ),
-        # ── New strategies ────────────────────────────────────────
-        "orb"        : ORBStrategy(
-            breakout_pct   = config.ORB_BREAKOUT_PCT,
-            gap_max_pct    = config.ORB_GAP_MAX_PCT,
-            use_adx_filter = config.ORB_USE_ADX_FILTER,
-            adx_threshold  = config.ORB_ADX_THRESHOLD,
-            time_stop_days = config.ORB_TIME_STOP_DAYS,
-            weekly         = True,
-        ),
-        "straddle"   : LongStraddleStrategy(
-            iv_entry_pct   = config.STRADDLE_IV_ENTRY_PCT,
-            iv_exit_pct    = config.STRADDLE_IV_EXIT_PCT,
-            otm_delta      = 0.0,  # ATM straddle
-            time_stop_days = config.STRADDLE_TIME_STOP_DAYS,
-            weekly         = True,
-        ),
-        "strangle"   : LongStraddleStrategy(
-            iv_entry_pct   = config.STRADDLE_IV_ENTRY_PCT,
-            iv_exit_pct    = config.STRADDLE_IV_EXIT_PCT,
-            otm_delta      = config.STRADDLE_OTM_DELTA if config.STRADDLE_OTM_DELTA > 0 else 0.25,
-            time_stop_days = config.STRADDLE_TIME_STOP_DAYS,
-            weekly         = True,
-        ),
-        "vwap_rev"   : VWAPReversionStrategy(
-            vwap_window    = config.VWAP_WINDOW,
-            std_mult       = config.VWAP_STD_MULT,
-            mode           = "reversion",
-            time_stop_days = config.VWAP_TIME_STOP_DAYS,
-            weekly         = True,
-        ),
-        "vwap_brk"   : VWAPReversionStrategy(
-            vwap_window    = config.VWAP_WINDOW,
-            std_mult       = config.VWAP_STD_MULT,
-            mode           = "breakout",
-            time_stop_days = config.VWAP_TIME_STOP_DAYS,
-            weekly         = True,
-        ),
-        "gap_fade"   : GapFadeStrategy(
-            gap_min_pct       = config.GAP_MIN_PCT,
-            gap_max_pct       = config.GAP_MAX_PCT,
-            require_no_follow = config.GAP_REQUIRE_NO_FOLLOW,
-            trend_filter      = config.GAP_TREND_FILTER,
-            time_stop_days    = config.GAP_TIME_STOP_DAYS,
-            weekly            = True,
-        ),
-        "iron_condor": IronCondorStrategy(
-            iv_entry_pct         = config.IC_IV_ENTRY_PCT,
-            iv_exit_pct          = config.IC_IV_EXIT_PCT,
-            body_delta           = config.IC_BODY_DELTA,
-            wing_delta           = config.IC_WING_DELTA,
-            use_adx_filter       = config.IC_USE_ADX_FILTER,
-            adx_choppy_threshold = config.IC_ADX_CHOPPY_THRESHOLD,
-            time_stop_days       = config.IC_TIME_STOP_DAYS,
-            weekly               = False,  # monthly for more theta
-        ),
-    }
-
-    # ── Inverse variants — wrap any strategy to flip CE↔PE ───────
-    for _key in list(strategies.keys()):
-        strategies[f"inv_{_key}"] = InverseStrategy(strategies[_key])
-    if name not in strategies:
-        print(f"Unknown strategy '{name}'. Available: {list(strategies.keys())}")
+        ])
+    
+    try:
+        return registry_get_strategy(name_clean)
+    except ValueError:
+        print(f"Unknown strategy '{name}'. Available: {list_strategies()}")
         sys.exit(1)
-    return strategies[name]
 
 
 # ── Commands ─────────────────────────────────────────────────────
@@ -295,7 +193,7 @@ def cmd_backtest(args):
 
 def cmd_signals(args):
     """Generate today's trading signals and print to console."""
-    from src.telegram_notify import generate_signal_message
+    from algo_trading.notifications.telegram import generate_signal_message
 
     strategy = get_strategy(args.strategy) if args.strategy != "combined" else None
 
@@ -303,7 +201,6 @@ def cmd_signals(args):
     msg = generate_signal_message(strategy=strategy)
 
     # Strip HTML tags for clean console output
-    import re
     print(re.sub(r"<[^>]+>", "", msg))
 
 
@@ -320,15 +217,14 @@ def cmd_fetch(args):
 
 def cmd_optimize(args):
     """Run Level 1 grid search optimization, optionally followed by Level 2 walk-forward."""
-    import logging
     # Suppress per-trade INFO logs during optimization runs for clean progress output
-    logging.getLogger("src.backtester").setLevel(logging.WARNING)
-    logging.getLogger("src.data_ingestion").setLevel(logging.WARNING)
-    logging.getLogger("src.options_pricing").setLevel(logging.WARNING)
-    logging.getLogger("src.risk_manager").setLevel(logging.WARNING)
+    logging.getLogger("algo_trading.core.backtester").setLevel(logging.WARNING)
+    logging.getLogger("algo_trading.data.ingestion").setLevel(logging.WARNING)
+    logging.getLogger("algo_trading.core.pricing").setLevel(logging.WARNING)
+    logging.getLogger("algo_trading.core.risk_manager").setLevel(logging.WARNING)
 
-    from src.optimizer import run_optimization
-    from src.walk_forward import run_walk_forward
+    from algo_trading.optimization.grid_search import run_optimization
+    from algo_trading.optimization.walk_forward import run_walk_forward
 
     tickers = args.ticker or config.UNDERLYINGS
 
@@ -376,7 +272,7 @@ def cmd_download_bhavcopy(args):
 
 def cmd_screen_stocks(args):
     """Screen stocks against multiple predefined strategies."""
-    from src.stock_screener import StockScreener
+    from algo_trading.screener.stock_screener import StockScreener, format_screening_results
 
     strategy_names = args.strategy or ["cheap_to_moon"]
     tickers = args.ticker
@@ -397,7 +293,6 @@ def cmd_screen_stocks(args):
         return
 
     # Print results
-    from src.stock_screener import format_screening_results
     report = format_screening_results(results)
     print("\n" + report + "\n")
 

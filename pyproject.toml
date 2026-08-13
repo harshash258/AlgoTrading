@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "algo-trading"
+version = "1.0.0"
+description = "Systematic Options & Equity Algorithmic Trading Framework for NSE"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "yfinance>=0.2.40",
+    "curl-cffi>=0.7.0",
+    "pandas>=2.0.0",
+    "numpy>=1.26.0",
+    "scipy>=1.11.0",
+    "mibian>=0.1.3",
+    "plotly>=5.20.0",
+    "jinja2>=3.1.0",
+    "matplotlib>=3.8.0",
+    "seaborn>=0.13.0",
+    "requests>=2.31.0",
+    "schedule>=1.2.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.scripts]
+algo-trading = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

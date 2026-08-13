@@ -32,7 +32,9 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
 
       - name: Create reports directory
         run: mkdir -p reports
@@ -51,7 +53,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python src/screener_telegram.py
+        run: python -m algo_trading.notifications.screener_bot
 
       - name: Upload reports as artifacts
         if: always()
