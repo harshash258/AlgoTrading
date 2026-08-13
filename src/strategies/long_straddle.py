@@ -145,6 +145,7 @@ class LongStraddleStrategy(BaseStrategy):
 
         # ── Entry: IV percentile is LOW → buy vol cheap ───────────
         if not in_trade and iv_percentile <= self.iv_entry_pct:
+            variant = "straddle" if self.otm_delta == 0 else "strangle"
             for opt_type, strike in (("CE", strike_ce), ("PE", strike_pe)):
                 signals.append(Signal(
                     date=current_date,
@@ -158,9 +159,13 @@ class LongStraddleStrategy(BaseStrategy):
                         "iv_percentile" : round(float(iv_percentile), 1),
                         "current_vix"   : round(current_vix, 2),
                         "spot"          : round(spot, 2),
-                        "variant"       : "straddle" if self.otm_delta == 0 else "strangle",
+                        "variant"       : variant,
                         "otm_delta"     : self.otm_delta,
                         "trigger"       : f"IV percentile {iv_percentile:.1f}% ≤ {self.iv_entry_pct}% (vol cheap)",
+                        # Mark both legs as part of the same paired trade so the
+                        # conflict detector does not flag CE+PE as opposing signals.
+                        "paired_legs"   : True,
+                        "pair_type"     : variant,
                     },
                 ))
             self._in_trade[underlying]  = True

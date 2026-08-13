@@ -354,6 +354,83 @@ def _format_signal_block(sig_info: dict, spot: float, vix: float,
     )
 
 
+def _is_paired(sig: dict) -> bool:
+    """Return True if this signal is one leg of a paired straddle/strangle trade."""
+    return sig.get("meta", {}).get("paired_legs", False)
+
+
+def _group_paired_signals(sigs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """
+    Separate signals into paired (straddle/strangle legs) and standalone.
+
+    Paired signals from the same strategy label are grouped together so they
+    display as one combined block rather than two separate CE/PE signals that
+    trigger a false conflict warning.
+
+    Returns (standalone_sigs, paired_groups) where paired_groups is a list of
+    dicts: {"label": str, "ce": sig, "pe": sig}.
+    """
+    paired_by_label: dict[str, dict] = {}
+    standalone: list[dict] = []
+
+    for sig in sigs:
+        if _is_paired(sig):
+            label = sig["strategy_label"]
+            if label not in paired_by_label:
+                paired_by_label[label] = {}
+            paired_by_label[label][sig["option_type"]] = sig
+        else:
+            standalone.append(sig)
+
+    paired_groups = []
+    for label, legs in paired_by_label.items():
+        if "CE" in legs and "PE" in legs:
+            paired_groups.append({"label": label, "ce": legs["CE"], "pe": legs["PE"]})
+        else:
+            # Incomplete pair — treat legs as standalone to avoid hiding them
+            standalone.extend(legs.values())
+
+    return standalone, paired_groups
+
+
+def _format_paired_block(group: dict, spot: float, vix: float,
+                          atm: int, ticker: str) -> str:
+    """Format a straddle/strangle pair as a single combined signal block."""
+    label     = group["label"]
+    ce_sig    = group["ce"]
+    pe_sig    = group["pe"]
+    meta      = ce_sig["meta"]
+    expiry    = ce_sig["expiry"]
+
+    ce_strike = int(ce_sig["strike"]) if ce_sig["strike"] > 0 else atm
+    pe_strike = int(pe_sig["strike"]) if pe_sig["strike"] > 0 else atm
+    pair_type = meta.get("pair_type", meta.get("variant", "straddle")).upper()
+
+    expiry_str = expiry.strftime("%d %b '%y") if expiry else "—"
+    trigger    = meta.get("trigger", "vol cheap")
+
+    risk_amt  = config.STARTING_CAPITAL * config.RISK_PER_TRADE_PCT / 100
+    lots_hint = config.LOT_SIZES.get(ticker, config.DEFAULT_LOT_SIZE)
+    sl_line   = f"SL      : -{config.BUY_STOP_LOSS_PCT:.0f}% of premium (each leg)"
+    tgt_line  = f"Target  : +{config.BUY_TARGET_PCT:.0f}% of premium (each leg)"
+
+    if ce_strike == pe_strike:
+        strike_line = f"Strike  : {ce_strike} CE + PE   Expiry: {expiry_str}"
+    else:
+        strike_line = f"Strikes : {ce_strike} CE  |  {pe_strike} PE   Expiry: {expiry_str}"
+
+    return (
+        f"  <b>BUY {pair_type}</b>  [{label}]\n"
+        f"  {strike_line}\n"
+        f"  Spot    : {spot:,.0f}  |  VIX: {vix:.1f}%\n"
+        f"  Trigger : {trigger}\n"
+        f"  {sl_line}\n"
+        f"  {tgt_line}\n"
+        f"  Risk    : ₹{risk_amt:,.0f} ({config.RISK_PER_TRADE_PCT}% capital) × 2 legs\n"
+        f"  Lots    : {lots_hint}"
+    )
+
+
 def _format_ticker_block(ticker: str, ticker_data: dict) -> str:
     """Format all signals for one underlying into a message block."""
     name  = ticker_data["name"]
@@ -362,22 +439,27 @@ def _format_ticker_block(ticker: str, ticker_data: dict) -> str:
     atm   = ticker_data["atm"]
     sigs  = ticker_data["sigs"]
 
-    # Detect conflict: same underlying has both CE and PE entry signals
-    opt_types = {s["option_type"] for s in sigs}
-    has_conflict = "CE" in opt_types and "PE" in opt_types
+    standalone, paired_groups = _group_paired_signals(sigs)
 
-    # Detect agreement: multiple different strategies pointing the same way
-    ce_strategies = [s["strategy_label"] for s in sigs if s["option_type"] == "CE"]
-    pe_strategies = [s["strategy_label"] for s in sigs if s["option_type"] == "PE"]
+    # True conflict: standalone strategies disagree on direction (not paired legs)
+    standalone_opt_types = {s["option_type"] for s in standalone}
+    has_conflict = "CE" in standalone_opt_types and "PE" in standalone_opt_types
+
+    # Agreement among standalone signals
+    ce_strategies = [s["strategy_label"] for s in standalone if s["option_type"] == "CE"]
+    pe_strategies = [s["strategy_label"] for s in standalone if s["option_type"] == "PE"]
 
     divider = "─" * 34
 
-    # Header line for this underlying
+    # Header
     conflict_badge = "  ⚡ CONFLICT" if has_conflict else ""
     header = f"<b>📊 {name}{conflict_badge}</b>"
 
-    # Agreement note
+    # Notes
     notes = []
+    if paired_groups:
+        pair_labels = ", ".join(g["label"] for g in paired_groups)
+        notes.append(f"  📐 Vol trade: {pair_labels}")
     if len(ce_strategies) >= 2:
         notes.append(f"  ✅ {len(ce_strategies)} strategies agree: BUY CE ({', '.join(ce_strategies)})")
     if len(pe_strategies) >= 2:
@@ -389,12 +471,12 @@ def _format_ticker_block(ticker: str, ticker_data: dict) -> str:
         )
     note_block = "\n".join(notes)
 
-    # Individual signal blocks
+    # Build signal blocks: paired first, then standalone
     sig_blocks = []
-    for sig_info in sigs:
-        sig_blocks.append(
-            _format_signal_block(sig_info, spot, vix, atm, ticker)
-        )
+    for group in paired_groups:
+        sig_blocks.append(_format_paired_block(group, spot, vix, atm, ticker))
+    for sig_info in standalone:
+        sig_blocks.append(_format_signal_block(sig_info, spot, vix, atm, ticker))
 
     body = f"\n\n{divider}\n".join(sig_blocks)
 
@@ -403,37 +485,63 @@ def _format_ticker_block(ticker: str, ticker_data: dict) -> str:
         parts.append(note_block)
     parts.append(body)
 
-    return f"\n".join(parts)
+    return "\n".join(parts)
 
 
 # ─────────────────────────────────────────────────────────────────
-# Split long messages for Telegram's 4096-char limit
+# Per-underlying message builder
 # ─────────────────────────────────────────────────────────────────
 
-_MAX_MSG_LEN = 4000  # leave some headroom below 4096
+_MAX_MSG_LEN = 4000  # leave some headroom below Telegram's 4096-char limit
 
-def _split_message(header: str, ticker_blocks: list[str], footer: str) -> list[str]:
+def _build_messages(
+    header: str,
+    ticker_blocks: list[tuple[str, str]],  # [(ticker, formatted_block), ...]
+    footer: str,
+) -> list[str]:
     """
-    Pack ticker blocks into messages that fit within Telegram's limit.
-    The header goes on the first message, footer on the last.
+    Return one Telegram message per underlying, plus an optional summary
+    header message when there are multiple underlyings.
+
+    Layout:
+      • If only one underlying: single message with header + block + footer.
+      • If multiple underlyings:
+          - Message 1: summary header (date, strategy count, signal count).
+          - Messages 2…N: one per underlying, each with its own footer.
+            If a single underlying's block still exceeds the limit it is
+            chunked line-by-line as a fallback.
     """
-    messages = []
-    current  = header
+    messages: list[str] = []
 
-    for i, block in enumerate(ticker_blocks):
-        separator = "\n\n" + "═" * 34 + "\n\n"
-        candidate = current + separator + block
-
-        if len(candidate) > _MAX_MSG_LEN and current != header:
-            # Current message is full — flush it
-            messages.append(current)
-            current = f"<b>NSE Signals (cont.)</b>\n" + "═" * 34 + "\n\n" + block
+    if len(ticker_blocks) <= 1:
+        # Single underlying — keep original single-message behaviour
+        if ticker_blocks:
+            _, block = ticker_blocks[0]
+            msg = header + "\n\n" + "═" * 34 + "\n\n" + block + footer
         else:
-            current = candidate if current != header else header + "\n\n" + "═" * 34 + "\n\n" + block
+            msg = header + footer
+        messages.append(msg)
+        return messages
 
-    # Attach footer to last message
-    current += footer
-    messages.append(current)
+    # Multiple underlyings — summary first, then one message per underlying
+    messages.append(header)
+
+    for ticker, block in ticker_blocks:
+        body = block + footer
+        if len(body) <= _MAX_MSG_LEN:
+            messages.append(body)
+        else:
+            # Rare edge case: one underlying has so many signals it overflows.
+            # Chunk by lines so no message exceeds the limit.
+            chunk = ""
+            for line in body.splitlines(keepends=True):
+                if len(chunk) + len(line) > _MAX_MSG_LEN:
+                    messages.append(chunk)
+                    chunk = line
+                else:
+                    chunk += line
+            if chunk:
+                messages.append(chunk)
 
     return messages
 
@@ -495,7 +603,12 @@ def generate_signal_messages() -> list[str]:
     n_strategies = len(_all_strategies())
 
     # ── Build header ──────────────────────────────────────────────
-    total_signals = sum(len(v["sigs"]) for v in collected.values())
+    # Count paired straddle/strangle legs as one signal each, not two
+    def _count_signals(ticker_data: dict) -> int:
+        standalone, paired = _group_paired_signals(ticker_data["sigs"])
+        return len(standalone) + len(paired)
+
+    total_signals = sum(_count_signals(v) for v in collected.values())
     header = (
         f"<b>🔔 NSE Options Signals</b>\n"
         f"Date       : {today.strftime('%d %b %Y')} (execute tomorrow at open)\n"
@@ -520,10 +633,11 @@ def generate_signal_messages() -> list[str]:
     # ── Format per-ticker blocks ──────────────────────────────────
     ticker_blocks = []
     for ticker in collected:
-        ticker_blocks.append(_format_ticker_block(ticker, collected[ticker]))
+        block = _format_ticker_block(ticker, collected[ticker])
+        ticker_blocks.append((TICKER_NAMES.get(ticker, ticker), block))
 
-    # ── Split into Telegram-sized messages ────────────────────────
-    return _split_message(header, ticker_blocks, footer)
+    # ── Build per-underlying messages ─────────────────────────────
+    return _build_messages(header, ticker_blocks, footer)
 
 
 # ─────────────────────────────────────────────────────────────────
