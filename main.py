@@ -277,6 +277,7 @@ def cmd_screen_stocks(args):
     strategy_names = args.strategy or ["cheap_to_moon"]
     tickers = args.ticker
     universe_file = args.universe
+    max_workers = getattr(args, 'max_workers', 4)  # Default to 4 if not provided
 
     screener = StockScreener()
     screener.add_strategies(strategy_names)
@@ -286,6 +287,7 @@ def cmd_screen_stocks(args):
     results = screener.search(
         tickers=tickers,
         universe_file=universe_file,
+        max_workers=max_workers,
     )
 
     if not results:
@@ -404,6 +406,10 @@ def main():
     screen_parser.add_argument(
         "--universe",
         help="Path to file with newline-separated ticker list (e.g. nse_tickers.txt)",
+    )
+    screen_parser.add_argument(
+        "--max-workers", type=int, default=4, dest="max_workers", metavar="N",
+        help="Number of parallel workers for fetching stock data (default: 4, max recommended: 8)",
     )
 
     args = parser.parse_args()

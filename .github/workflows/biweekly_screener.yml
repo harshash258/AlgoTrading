@@ -41,12 +41,12 @@ jobs:
 
       - name: Run Cheap to Moon screening
         run: |
-          python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt > reports/cheap_to_moon_log.txt 2>&1
+          python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt --max-workers 6 > reports/cheap_to_moon_log.txt 2>&1
           echo "Cheap to Moon screening completed"
 
       - name: Run Multibagger screening
         run: |
-          python main.py screen --strategy multibagger --universe nse_tickers_template.txt > reports/multibagger_log.txt 2>&1
+          python main.py screen --strategy multibagger --universe nse_tickers_template.txt --max-workers 6 > reports/multibagger_log.txt 2>&1
           echo "Multibagger screening completed"
 
       - name: Generate screener summary and send via Telegram

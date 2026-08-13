@@ -172,3 +172,23 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
+
+
+# ─────────────────────────────────────────────────────────────────
+# Public API / Wrapper Functions
+# ─────────────────────────────────────────────────────────────────
+
+def send_screener_summary() -> bool:
+    """
+    Send biweekly stock screener summary via Telegram.
+    Uses environment variables TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.
+    
+    Reads the most recent screening CSV files and sends a formatted summary.
+    
+    Returns
+    -------
+    bool
+        True if successful or tokens not configured (skip silently)
+        False if there was an error during sending
+    """
+    return main() == 0

@@ -26,6 +26,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Optional, Dict, List, Any
 import time
+import os
+from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import yfinance as yf
@@ -38,6 +41,11 @@ import config
 from algo_trading.data.screener_fetcher import fetch_screener_data
 
 logger = logging.getLogger(__name__)
+
+# Rate limiting for Screener.in requests (thread-safe)
+_screener_lock = Lock()
+_last_screener_request_time = 0.0
+_SCREENER_REQUEST_INTERVAL = 0.3  # 300ms between requests to avoid rate limiting
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -142,7 +150,11 @@ def _fetch_stock_metrics(ticker: str) -> Dict[str, Any]:
     
     PRIMARY: Screener.in (best fundamental data for Indian stocks)
     FALLBACK: yfinance (backup for price/market cap)
+    
+    Includes thread-safe rate limiting to avoid overwhelming Screener.in
     """
+    global _last_screener_request_time
+    
     result = {
         "ticker": ticker,
         "price": None,
@@ -171,7 +183,14 @@ def _fetch_stock_metrics(ticker: str) -> Dict[str, Any]:
     }
 
     # Step 1: Try Screener.in FIRST (best data for Indian stocks)
+    # Use rate limiter to prevent overwhelming the server
     try:
+        with _screener_lock:
+            elapsed = time.time() - _last_screener_request_time
+            if elapsed < _SCREENER_REQUEST_INTERVAL:
+                time.sleep(_SCREENER_REQUEST_INTERVAL - elapsed)
+            _last_screener_request_time = time.time()
+        
         symbol = ticker.replace(".NS", "").upper()
         screener_data = fetch_screener_data(symbol)
         
@@ -282,8 +301,9 @@ class StockScreener:
         self,
         tickers: Optional[List[str]] = None,
         universe_file: Optional[str] = None,
+        max_workers: int = 4,
     ) -> Dict[str, List[Dict]]:
-        """Search stocks against all strategies."""
+        """Search stocks against all strategies (with parallel fetching)."""
         if not self.strategies:
             logger.warning("No strategies loaded. Add strategies first.")
             return {}
@@ -298,15 +318,38 @@ class StockScreener:
             return {}
 
         logger.info(f"Screening {len(stocks_to_screen)} stocks against {len(self.strategies)} strategies...")
+        logger.info(f"  Using {max_workers} parallel workers...")
 
         results: Dict[str, List[Dict]] = {s.name: [] for s in self.strategies}
 
-        for idx, ticker in enumerate(stocks_to_screen, 1):
-            logger.info(f"  [{idx}/{len(stocks_to_screen)}] Fetching {ticker}...")
-            metrics = _fetch_stock_metrics(ticker)
+        # Parallel fetch with ThreadPoolExecutor (avoids GIL for I/O-bound operations)
+        all_metrics = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all fetch tasks
+            future_to_ticker = {
+                executor.submit(_fetch_stock_metrics, ticker): ticker
+                for ticker in stocks_to_screen
+            }
+            
+            # Process as they complete
+            completed = 0
+            for future in as_completed(future_to_ticker):
+                ticker = future_to_ticker[future]
+                try:
+                    metrics = future.result()
+                    all_metrics[ticker] = metrics
+                    completed += 1
+                    if completed % max(1, len(stocks_to_screen) // 10) == 0:
+                        logger.info(f"  [{completed}/{len(stocks_to_screen)}] Fetched {completed} stocks...")
+                except Exception as e:
+                    logger.warning(f"  Failed to fetch {ticker}: {e}")
+                    completed += 1
 
+        # Test fetched metrics against strategies
+        logger.info(f"Testing {len(all_metrics)} stocks against strategies...")
+        for ticker, metrics in all_metrics.items():
             if metrics["error"]:
-                logger.debug(f"    Skipped: {metrics['error']}")
+                logger.debug(f"    Skipped {ticker}: {metrics['error']}")
                 continue
 
             # Test against each strategy
@@ -322,9 +365,6 @@ class StockScreener:
                 }
 
                 results[strategy.name].append(result_entry)
-
-            # Small delay to avoid overwhelming Screener.in
-            time.sleep(0.5)
 
         # Sort each strategy's results by strongest match
         for strategy_name in results:
@@ -384,3 +424,41 @@ def format_screening_results(results: Dict[str, List[Dict]]) -> str:
                     msg += f"    {reason}\n"
 
     return msg
+
+
+# ─────────────────────────────────────────────────────────────────
+# Convenience Function
+# ─────────────────────────────────────────────────────────────────
+
+def run_screener(
+    strategy_names: List[str],
+    tickers: Optional[List[str]] = None,
+    universe_file: Optional[str] = None,
+    max_workers: int = 4,
+) -> Dict[str, List[Dict]]:
+    """
+    Convenience function to run screening with given strategies.
+    
+    Parameters
+    ----------
+    strategy_names : List[str]
+        Names of strategies to use (e.g., ["cheap_to_moon", "multibagger"])
+    tickers : Optional[List[str]]
+        Specific tickers to screen (if None, use universe_file)
+    universe_file : Optional[str]
+        Path to file with newline-separated ticker list
+    max_workers : int
+        Number of parallel workers for fetching (default: 4)
+    
+    Returns
+    -------
+    Dict[str, List[Dict]]
+        Results grouped by strategy name
+    """
+    screener = StockScreener()
+    screener.add_strategies(strategy_names)
+    return screener.search(
+        tickers=tickers,
+        universe_file=universe_file,
+        max_workers=max_workers,
+    )

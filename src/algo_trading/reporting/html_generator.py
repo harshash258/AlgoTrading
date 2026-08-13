@@ -214,8 +214,8 @@ def _pnl_histogram(trades_df: pd.DataFrame) -> str:
     if trades_df.empty:
         return "{}"
 
-    wins   = trades_df.loc[trades_df["P&L %"] > 0, "P&L %"]
-    losses = trades_df.loc[trades_df["P&L %"] <= 0, "P&L %"]
+    wins   = trades_df.loc[trades_df["pnl_pct"] > 0, "pnl_pct"]
+    losses = trades_df.loc[trades_df["pnl_pct"] <= 0, "pnl_pct"]
 
     fig = go.Figure()
     if not wins.empty:
@@ -256,13 +256,13 @@ def _pnl_bar_chart(trades_df: pd.DataFrame) -> str:
     if trades_df.empty:
         return "{}"
 
-    colors  = ["#27ae60" if v > 0 else "#e74c3c" for v in trades_df["P&L %"]]
-    cum_pnl = trades_df["P&L ₹"].cumsum().tolist()
-    labels  = [str(d)[:10] for d in trades_df["Entry Date"]]
+    colors  = ["#27ae60" if v > 0 else "#e74c3c" for v in trades_df["pnl_pct"]]
+    cum_pnl = trades_df["net_pnl"].cumsum().tolist()
+    labels  = [str(d)[:10] for d in trades_df["entry_date"]]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=labels, y=trades_df["P&L %"].tolist(),
+        x=labels, y=trades_df["pnl_pct"].tolist(),
         marker_color=colors,
         name="Trade P&L %",
         hovertemplate="<b>%{x}</b><br>P&L: %{y:.2f}%<extra></extra>",

@@ -772,3 +772,79 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ─────────────────────────────────────────────────────────────────
+# Public API / Wrapper Functions
+# ─────────────────────────────────────────────────────────────────
+
+def send_telegram_message(message: str, token: str, chat_id: str) -> bool:
+    """
+    Send a plain text message to Telegram.
+    
+    Parameters
+    ----------
+    message : str
+        Message text (supports HTML formatting: <b>, <i>, <code>)
+    token : str
+        Telegram bot token
+    chat_id : str
+        Telegram chat ID
+    
+    Returns
+    -------
+    bool
+        True if successful, False otherwise
+    """
+    return send_telegram(message, token, chat_id)
+
+
+def send_telegram_photo(photo_path: str, caption: str, token: str, chat_id: str) -> bool:
+    """
+    Send a photo to Telegram (placeholder — requires additional implementation).
+    
+    Parameters
+    ----------
+    photo_path : str
+        Path to photo file
+    caption : str
+        Caption for the photo
+    token : str
+        Telegram bot token
+    chat_id : str
+        Telegram chat ID
+    
+    Returns
+    -------
+    bool
+        True if successful, False otherwise
+    """
+    # Placeholder — full implementation would use Telegram's sendPhoto API
+    logger.warning("send_telegram_photo not fully implemented yet")
+    return False
+
+
+def generate_and_send_signals() -> bool:
+    """
+    Generate trading signals for today and send via Telegram.
+    Uses environment variables TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID.
+    
+    Returns
+    -------
+    bool
+        True if successful, False otherwise
+    """
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    
+    if not token or not chat_id:
+        logger.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables")
+        return False
+    
+    try:
+        messages = generate_signal_messages()
+        success = _send_in_parts(messages, token, chat_id)
+        return success
+    except Exception as e:
+        logger.error(f"Error generating and sending signals: {e}")
+        return False
