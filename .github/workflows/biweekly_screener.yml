@@ -1,0 +1,63 @@
+name: Biweekly Stock Screener
+
+on:
+  # Run every other Tuesday at 6:00 PM IST = 12:30 UTC
+  # (after market close for the day)
+  schedule:
+    - cron: "30 12 * * 2"
+
+  # Also allow manual trigger from GitHub UI or phone
+  workflow_dispatch:
+
+jobs:
+  run-screener:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create reports directory
+        run: mkdir -p reports
+
+      - name: Run Cheap to Moon screening
+        run: |
+          python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt > reports/cheap_to_moon_log.txt 2>&1
+          echo "Cheap to Moon screening completed"
+
+      - name: Run Multibagger screening
+        run: |
+          python main.py screen --strategy multibagger --universe nse_tickers_template.txt > reports/multibagger_log.txt 2>&1
+          echo "Multibagger screening completed"
+
+      - name: Generate screener summary and send via Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python src/screener_telegram.py
+
+      - name: Upload reports as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screener-reports-${{ github.run_id }}
+          path: reports/screen_*.csv
+          retention-days: 30
+

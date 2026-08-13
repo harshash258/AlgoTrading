@@ -374,6 +374,67 @@ def cmd_download_bhavcopy(args):
         verify_downloads(output_dir)
 
 
+def cmd_screen_stocks(args):
+    """Screen stocks against multiple predefined strategies."""
+    from src.stock_screener import StockScreener
+
+    strategy_names = args.strategy or ["cheap_to_moon"]
+    tickers = args.ticker
+    universe_file = args.universe
+
+    screener = StockScreener()
+    screener.add_strategies(strategy_names)
+
+    logger.info(f"Screening against {len(strategy_names)} strategies: {strategy_names}")
+
+    results = screener.search(
+        tickers=tickers,
+        universe_file=universe_file,
+    )
+
+    if not results:
+        print("No results.")
+        return
+
+    # Print results
+    from src.stock_screener import format_screening_results
+    report = format_screening_results(results)
+    print("\n" + report + "\n")
+
+    # Save to CSV if any matches found
+    csv_path = os.path.join(
+        config.REPORTS_DIR,
+        f"screen_{'_'.join(strategy_names)}_{date.today().isoformat()}.csv"
+    )
+    os.makedirs(config.REPORTS_DIR, exist_ok=True)
+
+    # Flatten results to CSV
+    rows = []
+    for strategy_name, matches in results.items():
+        for match in matches:
+            if match["passes"]:
+                m = match["metrics"]
+                rows.append({
+                    "strategy": strategy_name,
+                    "ticker": match["ticker"],
+                    "price": m.get("price"),
+                    "market_cap_cr": m.get("market_cap_cr"),
+                    "pe": m.get("pe"),
+                    "pb": m.get("pb"),
+                    "roce": m.get("roce"),
+                    "roe": m.get("roe"),
+                    "debt_to_equity": m.get("debt_to_equity"),
+                    "up_52w_pct": m.get("up_52w_pct"),
+                })
+
+    if rows:
+        import pandas as pd
+        df = pd.DataFrame(rows)
+        df.to_csv(csv_path, index=False)
+        logger.info(f"Results saved: {csv_path}")
+        print(f"📊 CSV saved: {csv_path}\n")
+
+
 # ── CLI ──────────────────────────────────────────────────────────
 
 def main():
@@ -435,6 +496,21 @@ def main():
         help="Ticker(s) to optimise on (default: all in config)",
     )
 
+    # screen
+    screen_parser = sub.add_parser("screen", help="Search for stocks matching screening criteria")
+    screen_parser.add_argument(
+        "--strategy", action="append",
+        help="Strategy to screen: cheap_to_moon | multibagger (default: cheap_to_moon)",
+    )
+    screen_parser.add_argument(
+        "--ticker", action="append",
+        help="Ticker(s) to screen (e.g. RELIANCE.NS TCS.NS)",
+    )
+    screen_parser.add_argument(
+        "--universe",
+        help="Path to file with newline-separated ticker list (e.g. nse_tickers.txt)",
+    )
+
     args = parser.parse_args()
     if args.command == "backtest":
         cmd_backtest(args)
@@ -446,6 +522,8 @@ def main():
         cmd_download_bhavcopy(args)
     elif args.command == "optimize":
         cmd_optimize(args)
+    elif args.command == "screen":
+        cmd_screen_stocks(args)
 
 
 if __name__ == "__main__":

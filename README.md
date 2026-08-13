@@ -266,7 +266,105 @@ Output: `reports/walk_forward_results_YYYY-MM-DD.csv`
 
 ---
 
+## NSE Stock Screener
+
+Find NSE stocks matching one or more predefined screening strategies using hybrid data sources
+(Screener.in primary + yfinance fallback).
+
+```bash
+# Single strategy, single ticker
+python main.py screen --strategy cheap_to_moon --ticker RELIANCE.NS
+
+# Multiple tickers with same strategy
+python main.py screen --strategy multibagger --ticker TECHM.NS --ticker SUNPHARMA.NS --ticker MARUTI.NS
+
+# Bulk screen from universe file (all 2,404 NSE stocks)
+python main.py screen --strategy multibagger --universe nse_tickers_template.txt
+
+# List all available strategies
+python main.py screen --help
+```
+
+### Available Screening Strategies
+
+Only 2 focused strategies are available, each designed for a specific market opportunity:
+
+#### 🚀 Cheap to Moon
+**Target:** Ultra-cheap penny stocks with positive momentum
+
+| Criterion                  | Value           |
+|----------------------------|-----------------|
+| P/B Ratio                  | < 1.0           |
+| P/E Ratio                  | > 0.5           |
+| Stock Price                | < ₹100          |
+| Market Cap                 | > ₹20 Cr        |
+| ROCE                       | > 5%            |
+| Up from 52w low            | > 10%           |
+
+**Use case:** Hunt for severely undervalued micro-caps bouncing back with momentum.
+
+#### � Multibagger
+**Target:** High-growth mid-cap stocks with strong fundamentals and promoter backing
+
+| Criterion                  | Value           |
+|----------------------------|-----------------|
+| Market Cap                 | ₹100–2500 Cr    |
+| Annual Sales               | > ₹100 Cr       |
+| Sales Growth (3Y CAGR)     | > 15%           |
+| Profit Growth (3Y CAGR)    | > 15%           |
+| ROCE                       | > 15%           |
+| ROE                        | > 15%           |
+| Debt/Equity Ratio          | < 0.5           |
+| PEG Ratio                  | < 1.5           |
+| Promoter Holding           | > 40%           |
+| Pledged %                  | < 5%            |
+| Up from 52w low            | > 10%           |
+
+**Use case:** Identify quality mid-cap growth stories with excellent fundamentals before
+they breakout.
+
+### Output
+
+Results are printed to console and saved to CSV in `reports/screen_<strategy>_YYYY-MM-DD.csv`.
+
+CSV includes: strategy, ticker, price, market cap, P/E, P/B, ROCE, ROE, D/E ratio, 52w movement.
+
+### Creating Your Universe File
+
+Create a text file (e.g., `nse_tickers.txt`) with one ticker per line:
+
+```
+RELIANCE.NS
+TCS.NS
+INFY.NS
+WIPRO.NS
+HDFCBANK.NS
+```
+
+Lines starting with `#` are ignored. Use the included `nse_tickers_template.txt` (all 2,404 NSE
+stocks) as a starting point — download via `fetch_nse_symbols.py` or use as-is.
+
+### Data Sources
+
+- **Primary:** Screener.in (comprehensive Indian stock fundamentals)
+- **Fallback:** yfinance (price, market cap, 52-week data)
+
+Metrics extracted per stock: P/E, P/B, ROCE, ROE, D/E ratio, promoter holding, pledged %,
+3-year sales & profit growth, PEG ratio.
+
+### Performance
+
+- ~1.5 seconds per stock (including Screener.in scrape + yfinance lookup)
+- 100 stocks: ~2.5 minutes
+- All 2,404 NSE stocks: ~60 minutes
+- 0.5s throttle between requests (prevents rate limiting)
+
+
+---
+
 ## NSE Bhavcopy (Real Options Chain Data)
+
+
 
 By default the system uses real historical NSE F&O option chain data from bhavcopy files
 (`BHAVCOPY_FOLDER = "data/bhavcopy"` in config.py) instead of synthetic Black-Scholes pricing.
@@ -323,6 +421,41 @@ set TELEGRAM_BOT_TOKEN=your_token
 set TELEGRAM_CHAT_ID=your_chat_id
 python src/telegram_notify.py
 ```
+
+---
+
+## Biweekly Stock Screener via Telegram
+
+GitHub Actions runs both screening strategies every other Tuesday at 6:00 PM IST and sends
+a summary of top matches via Telegram.
+
+**What the bot sends:**
+- Cheap to Moon strategy: count of matches + top 5 stocks
+- Multibagger strategy: count of matches + top 5 stocks
+- Total matches across both strategies
+- Stock details: ticker, price, P/B, P/E ratios
+- Execution timestamp
+
+**Trigger:** Every other Tuesday at 6:00 PM IST (12:30 UTC)
+
+**Manual trigger:**
+```bash
+# Run screener locally
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt
+python main.py screen --strategy multibagger --universe nse_tickers_template.txt
+
+# Or use GitHub Actions UI to manually trigger the workflow
+```
+
+**Setup:** Same as daily signals — requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets.
+
+The workflow:
+1. Downloads the latest market data and NSE stock universe
+2. Runs Cheap to Moon screening against all 2,404 NSE stocks
+3. Runs Multibagger screening against all 2,404 NSE stocks
+4. Generates a formatted summary message
+5. Sends results to your Telegram chat
+6. Uploads CSV reports as GitHub Actions artifacts for download
 
 ---
 
@@ -488,6 +621,7 @@ algo-trading/
 │   ├── walk_forward.py              # Level 2: Walk-forward with overfitting detection
 │   ├── bhavcopy_downloader.py       # NSE bhavcopy downloader
 │   ├── telegram_notify.py           # Daily signals via Telegram Bot API
+│   ├── screener_telegram.py         # Biweekly stock screening results via Telegram
 │   └── strategies/
 │       ├── base_strategy.py         # Abstract base class + Signal dataclass
 │       ├── combined_strategy.py     # Meta: merges signals from N child strategies
@@ -506,7 +640,8 @@ algo-trading/
 │   └── report_template.html         # Jinja2 HTML template
 ├── .github/
 │   └── workflows/
-│       └── daily_signals.yml        # GitHub Actions: daily Telegram delivery
+│       ├── daily_signals.yml          # GitHub Actions: daily Telegram signals (weekdays 4:15 PM IST)
+│       └── biweekly_screener.yml      # GitHub Actions: biweekly stock screening (Tuesdays 6:00 PM IST)
 ├── data/
 │   ├── bhavcopy/                    # NSE F&O bhavcopy ZIP files (~2,300 files)
 │   ├── cache/                       # Intermediate data cache
