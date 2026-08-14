@@ -1,19 +1,33 @@
 #!/usr/bin/env python
 """Build real fundamentals CSV for ALL NSE tickers from yfinance data."""
 
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)  # Suppress yfinance pandas deprecation warnings
+
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
 import sys
 import time
+import logging
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Load all tickers from template
-print("Loading ticker universe...")
+logger.info("Loading ticker universe from nse_tickers_template.txt...")
 with open('nse_tickers_template.txt') as f:
     tickers = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
-print(f"Fetching data for {len(tickers)} tickers...")
-print("="*70)
+logger.info(f"✓ Loaded {len(tickers)} tickers")
+logger.info("="*70)
+logger.info(f"Starting fetch for {len(tickers)} NSE stocks...")
+logger.info("="*70)
 
 rows = []
 success_count = 0
@@ -32,9 +46,12 @@ for i, ticker in enumerate(tickers, 1):
         price = info.get('currentPrice')
         if not price or (hist.empty):
             fail_count += 1
+            logger.debug(f"  SKIP [{i:4d}/{len(tickers)}] {ticker} - no price data")
             if i % 100 == 0:
                 elapsed = time.time() - start_time
-                print(f"[{i:4d}/{len(tickers)}] Progress: {i}/{len(tickers)} ({100*i/len(tickers):.1f}%) - Time: {elapsed:.0f}s")
+                rate = i / elapsed
+                eta = (len(tickers) - i) / rate if rate > 0 else 0
+                logger.info(f"  Progress: {i}/{len(tickers)} ({100*i/len(tickers):.1f}%) | Time: {elapsed:.0f}s | ETA: {eta:.0f}s | Success: {success_count}")
             continue
         
         # Extract data
@@ -79,28 +96,37 @@ for i, ticker in enumerate(tickers, 1):
         
         rows.append(row)
         success_count += 1
+        logger.debug(f"  ✓ [{i:4d}/{len(tickers)}] {ticker} - price={price:.2f}, market_cap={market_cap_cr:.2f}Cr, P/E={pe}, P/B={pb}")
         
         if i % 100 == 0:
             elapsed = time.time() - start_time
-            print(f"[{i:4d}/{len(tickers)}] Progress: {i}/{len(tickers)} ({100*i/len(tickers):.1f}%) - Time: {elapsed:.0f}s - Success: {success_count}")
+            rate = i / elapsed
+            eta = (len(tickers) - i) / rate if rate > 0 else 0
+            logger.info(f"  Progress: [{i:4d}/{len(tickers)}] {100*i/len(tickers):.1f}% | Elapsed: {elapsed:.0f}s | ETA: {eta:.0f}s | Success: {success_count}")
         
     except Exception as e:
         fail_count += 1
+        logger.error(f"  ✗ [{i:4d}/{len(tickers)}] {ticker} - Error: {str(e)}")
         if i % 100 == 0:
             elapsed = time.time() - start_time
-            print(f"[{i:4d}/{len(tickers)}] Progress: {i}/{len(tickers)} ({100*i/len(tickers):.1f}%) - Time: {elapsed:.0f}s")
+            rate = i / elapsed
+            eta = (len(tickers) - i) / rate if rate > 0 else 0
+            logger.info(f"  Progress: [{i:4d}/{len(tickers)}] {100*i/len(tickers):.1f}% | Elapsed: {elapsed:.0f}s | ETA: {eta:.0f}s | Success: {success_count}")
 
 total_time = time.time() - start_time
-print("="*70)
-print(f"SUCCESS: {success_count}/{len(tickers)}")
-print(f"FAILED: {fail_count}/{len(tickers)}")
-print(f"TOTAL TIME: {total_time:.0f} seconds ({total_time/60:.1f} minutes)")
+logger.info("="*70)
+logger.info(f"FINAL RESULTS:")
+logger.info(f"  Total tickers:     {len(tickers)}")
+logger.info(f"  Successfully fetched: {success_count} ({100*success_count/len(tickers):.1f}%)")
+logger.info(f"  Failed:            {fail_count} ({100*fail_count/len(tickers):.1f}%)")
+logger.info(f"  Total time:        {total_time:.0f}s ({total_time/60:.1f} min)")
+logger.info("="*70)
 
 # Save to CSV
 if rows:
     df = pd.DataFrame(rows)
     df.to_csv('data/fundamentals.csv', index=False)
-    print(f"\n✓ Saved {len(rows)} records to data/fundamentals.csv")
-    print(f"✓ Success rate: {100*success_count/len(tickers):.1f}%")
+    logger.info(f"✓ Saved {len(rows)} records to data/fundamentals.csv")
+    logger.info(f"✓ CSV file is ready for stock screener")
 else:
-    print("No data to save")
+    logger.error("No data to save - all tickers failed")
