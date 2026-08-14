@@ -48,3 +48,11 @@ def test_calculate_transaction_cost():
     """Verify brokerage calculation produces positive non-zero cost."""
     cost = calculate_transaction_cost(premium=250.0, lot_size=25, num_lots=2, side="buy")
     assert cost > 0
+
+
+def test_sell_transaction_cost_includes_sell_side_charges():
+    """Sell orders should include STT and no buy-side stamp duty."""
+    buy_cost = calculate_transaction_cost(premium=250.0, lot_size=25, num_lots=2, side="buy")
+    sell_cost = calculate_transaction_cost(premium=250.0, lot_size=25, num_lots=2, side="sell")
+
+    assert sell_cost > buy_cost

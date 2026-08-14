@@ -23,6 +23,9 @@ To run unit and regression tests:
 pytest tests/
 ```
 
+If `python` is not found or `.venv\Scripts\python.exe` points to an inaccessible interpreter,
+delete and recreate the virtual environment with the same install commands above.
+
 ### 2. Run your first backtest
 
 ```bash
@@ -711,14 +714,29 @@ All JS, CSS, and Plotly data is embedded inline — no internet required to open
 
 ---
 
+## Recent Improvements
+
+- Short option entries now use sell-side transaction costs, so short premium strategies include
+  the correct STT/stamp-duty treatment at entry.
+- Strategies now receive an `on_trade_closed(trade)` lifecycle callback after the backtester exits
+  a position via stop-loss, target, expiry, signal, or forced backtest close.
+- Stateful strategies reset local position flags on close, preventing stale `long_ce` / `long_pe`
+  state from blocking future valid signals.
+- `CombinedStrategy` routes close callbacks back to the child strategy that opened the trade using
+  `trade.entry_meta["source_strategy"]`.
+- Signal validation now raises `ValueError` instead of relying on Python `assert`, so validation
+  still runs under optimized Python.
+
+---
+
 ## Adding a New Strategy
 
-1. Create `src/strategies/my_strategy.py`
+1. Create `src/algo_trading/strategies/my_strategy.py`
 2. Inherit from `BaseStrategy`, implement `name` property and `generate_signals(data, vix, current_date)`
 3. Return a list of `Signal` objects (entry or exit)
-4. Register in `get_strategy()` in `main.py` and `_build_registry()` in `strategy_explorer.py`
-5. Add config defaults to `config.py`
-6. Export from `src/strategies/__init__.py`
+4. Register with `@register_strategy("my_key")`
+5. Import/export the strategy from `src/algo_trading/strategies/__init__.py`
+6. Add config defaults to `config/strategy_params.py` if the strategy needs tunable parameters
 
 **Signal schema:**
 
@@ -737,6 +755,11 @@ Signal(
 
 For multi-leg strategies (straddle, iron condor): emit multiple `Signal` objects in one
 `generate_signals()` call. The backtester handles each as an independent `Trade`.
+
+If the strategy stores local position state such as `_prev_signal`, `_entry_date`, `_pending`, or
+`_cross_counter`, the base `on_trade_closed(trade)` hook will reset those fields when a matching
+trade closes. Override `on_trade_closed()` only when the strategy has custom multi-leg state that
+cannot be reset by the default hook.
 
 ---
 

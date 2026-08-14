@@ -90,6 +90,7 @@ class Trade:
     entry_delta    : float = 0.0
     entry_iv       : float = 0.0
     entry_theta    : float = 0.0   # theta per day at entry (₹)
+    entry_meta     : dict = field(default_factory=dict)
 
     # Computed after close
     gross_pnl      : float = 0.0
@@ -276,7 +277,8 @@ class Backtester:
         lot_size = settings.LOT_SIZES.get(sig.underlying, settings.DEFAULT_LOT_SIZE)
         lots     = self.rm.position_size(entry_premium, lot_size)
 
-        entry_cost = calculate_transaction_cost(entry_premium, lot_size, lots, "buy")
+        entry_side = "buy" if sig.direction == "long" else "sell"
+        entry_cost = calculate_transaction_cost(entry_premium, lot_size, lots, entry_side)
         greeks     = bs_greeks(spot, strike, T, settings.RISK_FREE_RATE, sigma, sig.option_type)
 
         trade = Trade(
@@ -295,6 +297,7 @@ class Backtester:
             entry_delta   = greeks["delta"],
             entry_iv      = vix_val,
             entry_theta   = greeks["theta"],
+            entry_meta    = dict(sig.meta),
         )
 
         self.open_trades[trade.id] = trade
@@ -402,6 +405,7 @@ class Backtester:
         trade.close(current_date, exit_premium, spot, reason, exit_cost)
         self.closed_trades.append(trade)
         self.rm.register_close(trade_id, trade.net_pnl)
+        self.strategy.on_trade_closed(trade)
 
         logger.info(
             f"EXIT   {current_date} | {trade.underlying} {trade.option_type} "

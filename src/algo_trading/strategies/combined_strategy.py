@@ -63,6 +63,13 @@ class CombinedStrategy(BaseStrategy):
                 )
         return all_signals
 
+    def on_trade_closed(self, trade) -> None:
+        source_strategy = getattr(trade, "entry_meta", {}).get("source_strategy")
+        for strategy in self.strategies:
+            if source_strategy and strategy.name != source_strategy:
+                continue
+            strategy.on_trade_closed(trade)
+
     def get_params(self) -> dict:
         params = {"strategy": self.name, "num_strategies": len(self.strategies)}
         for i, s in enumerate(self.strategies):

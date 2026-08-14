@@ -46,12 +46,12 @@ class Signal:
     meta        : dict = field(default_factory=dict)
 
     def __post_init__(self):
-        assert self.direction in ("long", "short"), \
-            f"direction must be 'long' or 'short', got '{self.direction}'"
-        assert self.option_type in ("CE", "PE"), \
-            f"option_type must be 'CE' or 'PE', got '{self.option_type}'"
-        assert self.signal_type in ("entry", "exit"), \
-            f"signal_type must be 'entry' or 'exit', got '{self.signal_type}'"
+        if self.direction not in ("long", "short"):
+            raise ValueError(f"direction must be 'long' or 'short', got '{self.direction}'")
+        if self.option_type not in ("CE", "PE"):
+            raise ValueError(f"option_type must be 'CE' or 'PE', got '{self.option_type}'")
+        if self.signal_type not in ("entry", "exit"):
+            raise ValueError(f"signal_type must be 'entry' or 'exit', got '{self.signal_type}'")
 
 
 class BaseStrategy(ABC):
@@ -97,6 +97,39 @@ class BaseStrategy(ABC):
         Override in subclass to expose strategy-specific config values.
         """
         return {"strategy": self.name}
+
+    def on_trade_closed(self, trade) -> None:
+        """
+        Optional lifecycle hook called by the backtester after a trade closes.
+
+        Stateful directional strategies keep local position flags to avoid
+        duplicate entries. This default reset keeps those flags aligned when
+        the backtester exits by stop-loss, target, expiry, or forced close.
+        """
+        underlying = getattr(trade, "underlying", None)
+        option_type = getattr(trade, "option_type", None)
+        if not underlying or option_type not in ("CE", "PE"):
+            return
+
+        prev_signal = getattr(self, "_prev_signal", None)
+        if isinstance(prev_signal, dict):
+            expected = "long_ce" if option_type == "CE" else "long_pe"
+            if prev_signal.get(underlying) == expected:
+                prev_signal[underlying] = "none"
+
+        entry_date = getattr(self, "_entry_date", None)
+        if isinstance(entry_date, dict):
+            entry_date[underlying] = None
+
+        for attr in ("_pending", "_pending_dir"):
+            pending = getattr(self, attr, None)
+            if isinstance(pending, dict):
+                pending[underlying] = ""
+
+        for attr in ("_pending_bars", "_cross_counter"):
+            counter = getattr(self, attr, None)
+            if isinstance(counter, dict):
+                counter[underlying] = 0
 
 
 # ─────────────────────────────────────────────────────────────────
