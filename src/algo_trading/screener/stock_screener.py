@@ -85,6 +85,15 @@ class ScreeningStrategy:
                 passes = False
                 continue
 
+            # Convert to float if it's a string (from CSV)
+            try:
+                if isinstance(value, str):
+                    value = float(value)
+            except (ValueError, TypeError):
+                reasons.append(f"✗ {metric_name}: invalid data type ({type(value).__name__})")
+                passes = False
+                continue
+
             if "min" in rule:
                 min_val = rule["min"]
                 if value >= min_val:
@@ -163,18 +172,21 @@ def load_fundamentals_cache() -> Dict[str, Dict]:
 
     fundamentals = {}
     try:
-        with open(FUNDAMENTALS_CSV, "r") as f:
+        with open(FUNDAMENTALS_CSV, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 ticker = row.get("ticker", "").strip()
                 if ticker:
                     # Convert numeric strings to floats
-                    for key in row:
+                    for key in list(row.keys()):
                         if key not in ("ticker", "symbol", "updated_date", "error"):
                             try:
-                                if row[key]:
-                                    row[key] = float(row[key])
-                            except (ValueError, TypeError):
+                                val = row[key]
+                                if val and val.strip():  # Only convert non-empty strings
+                                    row[key] = float(val)
+                                else:
+                                    row[key] = None
+                            except (ValueError, TypeError, AttributeError):
                                 row[key] = None
                     fundamentals[ticker] = row
 
@@ -318,16 +330,45 @@ def compute_dynamic_metrics(
     price_data = current_price_data.get(ticker, {})
 
     if price_data:
-        result["price"] = price_data.get("price")
-        result["up_52w_pct"] = price_data.get("up_52w_pct")
+        price = price_data.get("price")
+        up_52w = price_data.get("up_52w_pct")
+        
+        # Convert to float if string
+        if price and isinstance(price, str):
+            try:
+                price = float(price)
+            except:
+                price = None
+        if up_52w and isinstance(up_52w, str):
+            try:
+                up_52w = float(up_52w)
+            except:
+                up_52w = None
+        
+        result["price"] = price
+        result["up_52w_pct"] = up_52w
 
         # Compute dynamic P/E ratio
-        if price_data.get("price") and result["eps"] and result["eps"] > 0:
-            result["pe"] = price_data["price"] / result["eps"]
+        eps_val = result["eps"]
+        if isinstance(eps_val, str):
+            try:
+                eps_val = float(eps_val)
+            except:
+                eps_val = None
+        
+        if price and eps_val and eps_val > 0:
+            result["pe"] = price / eps_val
 
         # Compute dynamic P/B ratio
-        if price_data.get("price") and result["book_value"] and result["book_value"] > 0:
-            result["pb"] = price_data["price"] / result["book_value"]
+        book_val = result["book_value"]
+        if isinstance(book_val, str):
+            try:
+                book_val = float(book_val)
+            except:
+                book_val = None
+        
+        if price and book_val and book_val > 0:
+            result["pb"] = price / book_val
 
     else:
         # Fallback to cached price/pe/pb if available

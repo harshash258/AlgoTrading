@@ -220,10 +220,18 @@ class TrendFollowingStrategy(BaseStrategy):
                     self._pending_dir[underlying]   = ""
                     self._cross_counter[underlying] = 0
 
-            confirmed_ce = (pending == "ce" and
-                            self._cross_counter.get(underlying, 0) >= self.confirm_bars)
-            confirmed_pe = (pending == "pe" and
-                            self._cross_counter.get(underlying, 0) >= self.confirm_bars)
+            current_pending = self._pending_dir.get(underlying, "")
+            current_counter = self._cross_counter.get(underlying, 0)
+            confirmed_ce = (
+                current_pending == "ce"
+                and current_counter >= self.confirm_bars
+                and prev != "long_ce"
+            )
+            confirmed_pe = (
+                current_pending == "pe"
+                and current_counter >= self.confirm_bars
+                and prev != "long_pe"
+            )
         else:
             # No confirmation needed — treat raw crossover as confirmed immediately
             confirmed_ce = bullish_cross and prev != "long_ce"

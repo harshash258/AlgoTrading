@@ -2,32 +2,44 @@
 """Build real fundamentals CSV for ALL NSE tickers from yfinance data."""
 
 import warnings
-warnings.filterwarnings('ignore', category=FutureWarning)  # Suppress yfinance pandas deprecation warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', message='.*utcnow.*')
 
-import yfinance as yf
-import pandas as pd
-from datetime import datetime
+import os
 import sys
 import time
 import logging
+from datetime import datetime, timezone
+import pandas as pd
+import yfinance as yf
 
-# Setup logging
+# Setup logging with immediate flush
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S'
+    datefmt='%H:%M:%S',
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
 # Load all tickers from template
 logger.info("Loading ticker universe from nse_tickers_template.txt...")
+if not os.path.exists('nse_tickers_template.txt'):
+    logger.error("nse_tickers_template.txt not found!")
+    sys.exit(1)
+
 with open('nse_tickers_template.txt') as f:
     tickers = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
-logger.info(f"✓ Loaded {len(tickers)} tickers")
-logger.info("="*70)
-logger.info(f"Starting fetch for {len(tickers)} NSE stocks...")
-logger.info("="*70)
+total_tickers = len(tickers)
+logger.info(f"✓ Loaded {total_tickers} tickers")
+logger.info("=" * 70)
+logger.info(f"Starting fetch for {total_tickers} NSE stocks...")
+logger.info("=" * 70)
+
+os.makedirs('data', exist_ok=True)
+csv_path = 'data/fundamentals.csv'
 
 rows = []
 success_count = 0
@@ -35,39 +47,27 @@ fail_count = 0
 start_time = time.time()
 
 for i, ticker in enumerate(tickers, 1):
+    t_start = time.time()
     try:
-        # Fetch ticker info
         t = yf.Ticker(ticker)
         info = t.info or {}
-        
-        # Fetch historical data for 52-week range
         hist = t.history(period='1y')
         
         price = info.get('currentPrice')
-        if not price or (hist.empty):
+        if not price or hist.empty:
             fail_count += 1
-            logger.debug(f"  SKIP [{i:4d}/{len(tickers)}] {ticker} - no price data")
-            if i % 100 == 0:
-                elapsed = time.time() - start_time
-                rate = i / elapsed
-                eta = (len(tickers) - i) / rate if rate > 0 else 0
-                logger.info(f"  Progress: {i}/{len(tickers)} ({100*i/len(tickers):.1f}%) | Time: {elapsed:.0f}s | ETA: {eta:.0f}s | Success: {success_count}")
+            logger.warning(f"[{i:4d}/{total_tickers}] {ticker:<14} ⚠ Skipped (no price/history data)")
             continue
         
-        # Extract data
-        market_cap_cr = info.get('marketCap', 0) / 1_00_00_000 if info.get('marketCap') else None
+        market_cap_cr = (info.get('marketCap', 0) / 1_00_00_000) if info.get('marketCap') else None
         pe = info.get('trailingPE')
         pb = info.get('priceToBook')
         eps = info.get('trailingEps')
         roe = info.get('returnOnEquity')
         dividend_yield = info.get('dividendYield')
         
-        # Book value per share
-        book_value = None
-        if pb and pb > 0 and price > 0:
-            book_value = price / pb
+        book_value = (price / pb) if (pb and pb > 0 and price > 0) else None
         
-        # 52-week range
         low_52w = hist['Low'].min() if len(hist) > 0 else None
         high_52w = hist['High'].max() if len(hist) > 0 else None
         up_52w_pct = ((price - low_52w) / low_52w * 100) if (low_52w and low_52w > 0) else None
@@ -75,7 +75,7 @@ for i, ticker in enumerate(tickers, 1):
         row = {
             'ticker': ticker,
             'symbol': ticker.replace('.NS', ''),
-            'updated_date': datetime.now().isoformat(),
+            'updated_date': datetime.now(timezone.utc).isoformat(),
             'price': price,
             'market_cap_cr': market_cap_cr,
             'eps': eps,
@@ -96,37 +96,36 @@ for i, ticker in enumerate(tickers, 1):
         
         rows.append(row)
         success_count += 1
-        logger.debug(f"  ✓ [{i:4d}/{len(tickers)}] {ticker} - price={price:.2f}, market_cap={market_cap_cr:.2f}Cr, P/E={pe}, P/B={pb}")
+        elapsed_stock = time.time() - t_start
+        pe_str = f"{pe:.1f}" if pe else "-"
+        pb_str = f"{pb:.1f}" if pb else "-"
+        logger.info(f"[{i:4d}/{total_tickers}] {ticker:<14} ✓ Price: ₹{price:<8.2f} P/E: {pe_str:<6} P/B: {pb_str:<6} ({elapsed_stock:.2f}s)")
         
-        if i % 100 == 0:
+        # Periodically save backup every 50 tickers
+        if len(rows) % 50 == 0:
+            pd.DataFrame(rows).to_csv(csv_path, index=False)
             elapsed = time.time() - start_time
             rate = i / elapsed
-            eta = (len(tickers) - i) / rate if rate > 0 else 0
-            logger.info(f"  Progress: [{i:4d}/{len(tickers)}] {100*i/len(tickers):.1f}% | Elapsed: {elapsed:.0f}s | ETA: {eta:.0f}s | Success: {success_count}")
-        
+            eta = (total_tickers - i) / rate if rate > 0 else 0
+            logger.info(f"--- [Progress: {i}/{total_tickers} ({100*i/total_tickers:.1f}%)] | Elapsed: {elapsed/60:.1f}m | ETA: {eta/60:.1f}m | Saved checkpoint ---")
+
     except Exception as e:
         fail_count += 1
-        logger.error(f"  ✗ [{i:4d}/{len(tickers)}] {ticker} - Error: {str(e)}")
-        if i % 100 == 0:
-            elapsed = time.time() - start_time
-            rate = i / elapsed
-            eta = (len(tickers) - i) / rate if rate > 0 else 0
-            logger.info(f"  Progress: [{i:4d}/{len(tickers)}] {100*i/len(tickers):.1f}% | Elapsed: {elapsed:.0f}s | ETA: {eta:.0f}s | Success: {success_count}")
+        logger.error(f"[{i:4d}/{total_tickers}] {ticker:<14} ✗ Error: {str(e)}")
 
 total_time = time.time() - start_time
-logger.info("="*70)
-logger.info(f"FINAL RESULTS:")
-logger.info(f"  Total tickers:     {len(tickers)}")
-logger.info(f"  Successfully fetched: {success_count} ({100*success_count/len(tickers):.1f}%)")
-logger.info(f"  Failed:            {fail_count} ({100*fail_count/len(tickers):.1f}%)")
-logger.info(f"  Total time:        {total_time:.0f}s ({total_time/60:.1f} min)")
-logger.info("="*70)
+logger.info("=" * 70)
+logger.info("FINAL RESULTS:")
+logger.info(f"  Total tickers:        {total_tickers}")
+logger.info(f"  Successfully fetched: {success_count} ({100*success_count/total_tickers:.1f}%)")
+logger.info(f"  Failed:               {fail_count} ({100*fail_count/total_tickers:.1f}%)")
+logger.info(f"  Total time:           {total_time:.0f}s ({total_time/60:.1f} min)")
+logger.info("=" * 70)
 
-# Save to CSV
+# Final Save
 if rows:
     df = pd.DataFrame(rows)
-    df.to_csv('data/fundamentals.csv', index=False)
-    logger.info(f"✓ Saved {len(rows)} records to data/fundamentals.csv")
-    logger.info(f"✓ CSV file is ready for stock screener")
+    df.to_csv(csv_path, index=False)
+    logger.info(f"✓ Saved {len(rows)} records to {csv_path}")
 else:
     logger.error("No data to save - all tickers failed")

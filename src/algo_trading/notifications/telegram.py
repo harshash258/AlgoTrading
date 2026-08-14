@@ -393,6 +393,33 @@ def _group_paired_signals(sigs: list[dict]) -> tuple[list[dict], list[dict]]:
     return standalone, paired_groups
 
 
+def _dedupe_vol_pairs(paired_groups: list[dict]) -> list[dict]:
+    """
+    Keep one low-IV volatility idea per underlying.
+
+    Straddle and strangle express the same "buy volatility" view. Showing both
+    makes the alert look like duplicate trades, so prefer the ATM straddle when
+    both fire.
+    """
+    if len(paired_groups) <= 1:
+        return paired_groups
+
+    low_iv_groups = [
+        g for g in paired_groups
+        if g["ce"].get("meta", {}).get("pair_type") in ("straddle", "strangle")
+    ]
+    other_groups = [g for g in paired_groups if g not in low_iv_groups]
+
+    if len(low_iv_groups) <= 1:
+        return paired_groups
+
+    preferred = sorted(
+        low_iv_groups,
+        key=lambda g: 0 if g["ce"].get("meta", {}).get("pair_type") == "straddle" else 1,
+    )[0]
+    return other_groups + [preferred]
+
+
 def _format_paired_block(group: dict, spot: float, vix: float,
                           atm: int, ticker: str) -> str:
     """Format a straddle/strangle pair as a single combined signal block."""
@@ -404,7 +431,8 @@ def _format_paired_block(group: dict, spot: float, vix: float,
 
     ce_strike = int(ce_sig["strike"]) if ce_sig["strike"] > 0 else atm
     pe_strike = int(pe_sig["strike"]) if pe_sig["strike"] > 0 else atm
-    pair_type = meta.get("pair_type", meta.get("variant", "straddle")).upper()
+    pair_type = meta.get("pair_type", meta.get("variant", "straddle")).lower()
+    display_pair_type = pair_type.upper()
 
     expiry_str = expiry.strftime("%d %b '%y") if expiry else "—"
     trigger    = meta.get("trigger", "vol cheap")
@@ -415,13 +443,18 @@ def _format_paired_block(group: dict, spot: float, vix: float,
     tgt_line  = f"Target  : +{config.BUY_TARGET_PCT:.0f}% of premium (each leg)"
 
     if ce_strike == pe_strike:
-        strike_line = f"Strike  : {ce_strike} CE + PE   Expiry: {expiry_str}"
+        setup_line = "Setup   : ATM straddle - buy same strike CE and PE"
+        strike_line = f"Legs    : {ce_strike} CE + {ce_strike} PE"
     else:
-        strike_line = f"Strikes : {ce_strike} CE  |  {pe_strike} PE   Expiry: {expiry_str}"
+        setup_line = "Setup   : OTM strangle - buy higher CE and lower PE"
+        strike_line = f"Legs    : {ce_strike} CE + {pe_strike} PE"
 
     return (
-        f"  <b>BUY {pair_type}</b>  [{label}]\n"
+        f"  <b>BUY VOLATILITY - {display_pair_type}</b>  [{label}]\n"
+        f"  View    : Big move expected; direction does not matter\n"
+        f"  {setup_line}\n"
         f"  {strike_line}\n"
+        f"  Expiry  : {expiry_str}\n"
         f"  Spot    : {spot:,.0f}  |  VIX: {vix:.1f}%\n"
         f"  Trigger : {trigger}\n"
         f"  {sl_line}\n"
@@ -440,6 +473,7 @@ def _format_ticker_block(ticker: str, ticker_data: dict) -> str:
     sigs  = ticker_data["sigs"]
 
     standalone, paired_groups = _group_paired_signals(sigs)
+    paired_groups = _dedupe_vol_pairs(paired_groups)
 
     # True conflict: standalone strategies disagree on direction (not paired legs)
     standalone_opt_types = {s["option_type"] for s in standalone}
@@ -459,7 +493,7 @@ def _format_ticker_block(ticker: str, ticker_data: dict) -> str:
     notes = []
     if paired_groups:
         pair_labels = ", ".join(g["label"] for g in paired_groups)
-        notes.append(f"  📐 Vol trade: {pair_labels}")
+        notes.append(f"  Volatility trade: CE + PE is intentional, not a conflict ({pair_labels})")
     if len(ce_strategies) >= 2:
         notes.append(f"  ✅ {len(ce_strategies)} strategies agree: BUY CE ({', '.join(ce_strategies)})")
     if len(pe_strategies) >= 2:
@@ -606,6 +640,7 @@ def generate_signal_messages() -> list[str]:
     # Count paired straddle/strangle legs as one signal each, not two
     def _count_signals(ticker_data: dict) -> int:
         standalone, paired = _group_paired_signals(ticker_data["sigs"])
+        paired = _dedupe_vol_pairs(paired)
         return len(standalone) + len(paired)
 
     total_signals = sum(_count_signals(v) for v in collected.values())
