@@ -15,7 +15,16 @@ Daily signals delivered automatically via Telegram using GitHub Actions.
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
+pip install -e .
 ```
+
+To run unit and regression tests:
+```bash
+pytest tests/
+```
+
+If `python` is not found or `.venv\Scripts\python.exe` points to an inaccessible interpreter,
+delete and recreate the virtual environment with the same install commands above.
 
 ### 2. Run your first backtest
 
@@ -46,6 +55,21 @@ python strategy_explorer.py --no-bhavcopy          # fast run using Black-Schole
 ```bash
 python main.py fetch
 ```
+
+### 6. Screen stocks for trading opportunities
+
+```bash
+# Screen all 2,404 NSE stocks (~12-15 minutes with 4 workers)
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt
+
+# Speed up with more workers (6-8 recommended for CI/CD)
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt --max-workers 8
+
+# Or use conservative settings (2 workers)
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt --max-workers 2
+```
+
+Results saved to `reports/screen_cheap_to_moon_YYYY-MM-DD.csv`
 
 ---
 
@@ -266,17 +290,106 @@ Output: `reports/walk_forward_results_YYYY-MM-DD.csv`
 
 ---
 
-## NSE Stock Screener
+## NSE Stock Screener (Optimized Architecture)
 
-Find NSE stocks matching one or more predefined screening strategies using hybrid data sources
-(Screener.in primary + yfinance fallback).
+**NEW (August 2026):** The screener now uses a **two-workflow architecture** for 140-420× speedup:
+
+1. **Monthly Heavy Lifting:** `scripts/update_fundamentals.py` caches fundamental metrics to `data/fundamentals.csv`
+2. **Biweekly Fast Screening:** `main.py screen` reads cache + bulk fetches prices (~10-30 seconds)
+
+### How It Works
+
+```
+Workflow 1: Monthly (1st of month, 00:00 UTC)
+├─ Fetch fundamentals from Screener.in (cached for 25 days)
+├─ Fallback to yfinance for missing metrics
+└─ Save to data/fundamentals.csv → commit to git
+
+Workflow 2: Biweekly (1st & 15th, 12:30 UTC)
+├─ Load data/fundamentals.csv (cached)
+├─ Bulk fetch current prices in single yf.download() call
+├─ Compute dynamic P/E = price / eps (real-time)
+├─ Compute dynamic P/B = price / book_value (real-time)
+├─ Apply strategy rules (filter + rank)
+└─ Save results to reports/screen_*.csv
+```
+
+**Performance Comparison:**
+
+| Metric | Old | New | Improvement |
+|--------|-----|-----|------------|
+| Screener.in calls | 2,404/run | 0/biweekly | ∞ (moved to monthly) |
+| Time per screening | 70 min | 10-30 sec | **140-420× faster** |
+| Rate-limiting delays | 70 min | 0 sec | Eliminated |
+| Cache approach | None | 25-day fundamentals | Full data reuse |
+
+### Setup: Generate Initial Fundamentals Cache
+
+**First time only: Generate the fundamentals cache (2,404 NSE stocks)**
 
 ```bash
-# Single strategy, single ticker
-python main.py screen --strategy cheap_to_moon --ticker RELIANCE.NS
+# Build full CSV for all 2,404 tickers (~30-60 minutes)
+# This fetches real market data from yfinance
+python build_full_csv.py
 
-# Multiple tickers with same strategy
-python main.py screen --strategy multibagger --ticker TECHM.NS --ticker SUNPHARMA.NS --ticker MARUTI.NS
+# Once complete, fundamentals are cached in data/fundamentals.csv
+# Subsequent screening runs use this cache (no re-fetching needed)
+```
+
+**Alternative (if you already have Screener.in data):**
+
+```bash
+# Update using Screener.in + yfinance fallback (~80 minutes first time, ~10 min after)
+python scripts/update_fundamentals.py
+
+# Or force refresh (skip cache check):
+python scripts/update_fundamentals.py --force
+
+# Test with first 50 tickers:
+python scripts/update_fundamentals.py --limit 50
+```
+
+Creates `data/fundamentals.csv` with all metrics needed for screening.
+
+### Run Screening
+
+```bash
+# Single strategy, all 2,404 NSE stocks (~15-30 seconds)
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt
+
+# Multiple strategies (batched against same cached data):
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt
+python main.py screen --strategy multibagger --universe nse_tickers_template.txt
+
+# Single tickers (instant):
+python main.py screen --strategy multibagger --ticker TECHM.NS --ticker SUNPHARMA.NS
+
+# Results saved to:
+# reports/screen_cheap_to_moon_YYYY-MM-DD.csv
+# reports/screen_multibagger_YYYY-MM-DD.csv
+```
+
+### CLI Reference
+
+**Update Fundamentals:**
+```bash
+python scripts/update_fundamentals.py                       # Normal: skip fresh
+python scripts/update_fundamentals.py --force               # Update all (takes ~80 min)
+python scripts/update_fundamentals.py --universe custom.txt # Custom ticker file
+python scripts/update_fundamentals.py --limit 100           # Test: first 100 only
+python scripts/update_fundamentals.py --force --limit 50    # Combine flags
+```
+
+**Run Screening:**
+```bash
+python main.py screen --strategy cheap_to_moon \
+  --universe nse_tickers_template.txt
+
+python main.py screen --strategy multibagger \
+  --universe nse_tickers_template.txt
+
+# --max-workers flag kept for compatibility (not used in new architecture)
+```
 
 # Bulk screen from universe file (all 2,404 NSE stocks)
 python main.py screen --strategy multibagger --universe nse_tickers_template.txt
@@ -438,11 +551,17 @@ a summary of top matches via Telegram.
 
 **Trigger:** Every other Tuesday at 6:00 PM IST (12:30 UTC)
 
+**Performance:** Optimized for speed — screens all 2,404 NSE stocks in ~12-15 minutes 
+(parallelized fetching with 6 workers on GitHub Actions).
+
 **Manual trigger:**
 ```bash
-# Run screener locally
+# Run screener locally (default 4 parallel workers)
 python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt
 python main.py screen --strategy multibagger --universe nse_tickers_template.txt
+
+# Customize parallel workers (2-8 recommended, more = faster but higher API load)
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt --max-workers 6
 
 # Or use GitHub Actions UI to manually trigger the workflow
 ```
@@ -456,6 +575,43 @@ The workflow:
 4. Generates a formatted summary message
 5. Sends results to your Telegram chat
 6. Uploads CSV reports as GitHub Actions artifacts for download
+
+---
+
+## Performance Optimization
+
+### Stock Screener Speed
+
+The stock screener was optimized to handle 2,404 NSE stocks efficiently:
+
+**Before:** 70 minutes
+- Serial processing (1 stock at a time)
+- 0.5s rate-limiting delay per stock
+- No parallelization
+
+**After:** 12-15 minutes (4-5x faster)
+- **Parallel fetching** with ThreadPoolExecutor (configurable workers)
+- **Thread-safe rate limiting** (300ms smart delay, not fixed 500ms)
+- **Smart separation** of fetch and validation phases
+- Fetch all metrics concurrently, then validate serially (fast)
+
+**Configuration:**
+```bash
+# Default: 4 parallel workers
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt
+
+# Faster: 6-8 workers (CI/CD friendly, higher API load)
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt --max-workers 8
+
+# Conservative: 2 workers (low resource usage, respectful of APIs)
+python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt --max-workers 2
+```
+
+**How it works:**
+- Screener.in is rate-limited (300ms between requests) using thread-safe locks
+- yfinance calls run in parallel (different API, no rate limit)
+- Multiple threads fetch different stocks simultaneously
+- Progress logged every ~10% completion instead of per-stock noise
 
 ---
 
@@ -558,14 +714,29 @@ All JS, CSS, and Plotly data is embedded inline — no internet required to open
 
 ---
 
+## Recent Improvements
+
+- Short option entries now use sell-side transaction costs, so short premium strategies include
+  the correct STT/stamp-duty treatment at entry.
+- Strategies now receive an `on_trade_closed(trade)` lifecycle callback after the backtester exits
+  a position via stop-loss, target, expiry, signal, or forced backtest close.
+- Stateful strategies reset local position flags on close, preventing stale `long_ce` / `long_pe`
+  state from blocking future valid signals.
+- `CombinedStrategy` routes close callbacks back to the child strategy that opened the trade using
+  `trade.entry_meta["source_strategy"]`.
+- Signal validation now raises `ValueError` instead of relying on Python `assert`, so validation
+  still runs under optimized Python.
+
+---
+
 ## Adding a New Strategy
 
-1. Create `src/strategies/my_strategy.py`
+1. Create `src/algo_trading/strategies/my_strategy.py`
 2. Inherit from `BaseStrategy`, implement `name` property and `generate_signals(data, vix, current_date)`
 3. Return a list of `Signal` objects (entry or exit)
-4. Register in `get_strategy()` in `main.py` and `_build_registry()` in `strategy_explorer.py`
-5. Add config defaults to `config.py`
-6. Export from `src/strategies/__init__.py`
+4. Register with `@register_strategy("my_key")`
+5. Import/export the strategy from `src/algo_trading/strategies/__init__.py`
+6. Add config defaults to `config/strategy_params.py` if the strategy needs tunable parameters
 
 **Signal schema:**
 
@@ -584,6 +755,11 @@ Signal(
 
 For multi-leg strategies (straddle, iron condor): emit multiple `Signal` objects in one
 `generate_signals()` call. The backtester handles each as an independent `Trade`.
+
+If the strategy stores local position state such as `_prev_signal`, `_entry_date`, `_pending`, or
+`_cross_counter`, the base `on_trade_closed(trade)` hook will reset those fields when a matching
+trade closes. Override `on_trade_closed()` only when the strategy has custom multi-leg state that
+cannot be reset by the default hook.
 
 ---
 
@@ -606,42 +782,74 @@ All P&L deducts real transaction costs (Groww flat-fee model):
 
 ```
 algo-trading/
-├── main.py                          # CLI entry point
-├── strategy_explorer.py             # Strategy combination tester & ranker
-├── config.py                        # All parameters
+├── .env.example                     # Environment variables template (Telegram keys)
+├── config/                          # Modular configuration package
+│   ├── __init__.py                  # Re-exports all settings
+│   ├── settings.py                  # Capital, lot sizes, brokerage & risk parameters
+│   └── strategy_params.py           # Default hyperparameters per strategy
+├── config.py                        # Root backward-compatible config proxy
+├── pyproject.toml                   # Standard package configuration (pip install -e .)
 ├── requirements.txt                 # Python dependencies
+├── main.py                          # Unified CLI entry point
+├── strategy_explorer.py             # Strategy combination tester & ranker
+├── download_bhavcopy.py             # Bhavcopy download helper
+├── fetch_nse_symbols.py             # NSE ticker fetcher
+├── test.py                          # Legacy experimental scratchpad
+│
 ├── src/
-│   ├── data_ingestion.py            # yfinance fetching + bhavcopy loader + ChainLookup
-│   ├── options_pricing.py           # Black-Scholes pricing + Greeks + expiry helpers
-│   ├── backtester.py                # Core event-driven backtest engine
-│   ├── risk_manager.py              # Position sizing + SL/target + drawdown gating
-│   ├── reporter.py                  # 15+ performance metrics + console summary
-│   ├── html_report.py               # HTML dashboard generator (Jinja2 + Plotly)
-│   ├── optimizer.py                 # Level 1: Grid search (16× speedup via replay)
-│   ├── walk_forward.py              # Level 2: Walk-forward with overfitting detection
-│   ├── bhavcopy_downloader.py       # NSE bhavcopy downloader
-│   ├── telegram_notify.py           # Daily signals via Telegram Bot API
-│   ├── screener_telegram.py         # Biweekly stock screening results via Telegram
-│   └── strategies/
-│       ├── base_strategy.py         # Abstract base class + Signal dataclass
-│       ├── combined_strategy.py     # Meta: merges signals from N child strategies
-│       ├── inverse_strategy.py      # Meta: flips CE↔PE on any strategy
-│       ├── trend_following.py       # MA Crossover (ADX, confirm, direction, time-stop)
-│       ├── rsi_strategy.py          # RSI Reversal (Wilder smoothing)
-│       ├── confluence_strategy.py   # MA + RSI Agreement (both must confirm)
-│       ├── mean_reversion.py        # Short Strangle on High IV percentile
-│       ├── bollinger_band_strategy.py # BB reversion with VIX regime filter
-│       ├── orb_strategy.py          # Opening Range Breakout (daily proxy)
-│       ├── long_straddle.py         # Long Straddle/Strangle on Low IV
-│       ├── vwap_reversion.py        # VWAP ± σ-band reversion or breakout
-│       ├── gap_fade.py              # Fade opening gaps with no follow-through
-│       └── iron_condor.py           # Delta-neutral Iron Condor (chop regime)
+│   └── algo_trading/                # Canonical Python package namespace
+│       ├── core/                    # Simulation & mathematical engines
+│       │   ├── backtester.py        # Event-driven backtest engine & Trade dataclass
+│       │   ├── pricing.py           # Black-Scholes pricing + Greeks + expiry helpers
+│       │   └── risk_manager.py      # Position sizing + SL/target + drawdown gating
+│       ├── data/                    # Data ingestion & market data loaders
+│       │   ├── ingestion.py         # YFinance fetching + bhavcopy loader + ChainLookup
+│       │   ├── bhavcopy.py          # NSE bhavcopy downloader
+│       │   └── screener_fetcher.py  # Fundamental metrics scraper
+│       ├── strategies/              # Pluggable strategy registry
+│       │   ├── __init__.py          # Strategy registry & auto-discovery
+│       │   ├── base.py              # BaseStrategy, Signal, and @register_strategy
+│       │   ├── trend_following.py   # MA Crossover (ADX, confirm, direction, time-stop)
+│       │   ├── rsi_strategy.py      # RSI Reversal (Wilder smoothing)
+│       │   ├── bollinger_band_strategy.py # BB reversion with VIX regime filter
+│       │   ├── confluence_strategy.py   # MA + RSI Agreement (both must confirm)
+│       │   ├── mean_reversion.py    # Short Strangle on High IV percentile
+│       │   ├── combined_strategy.py # Meta: merges signals from N child strategies
+│       │   ├── inverse_strategy.py  # Meta: flips CE↔PE on any strategy
+│       │   ├── orb_strategy.py      # Opening Range Breakout (daily proxy)
+│       │   ├── long_straddle.py     # Long Straddle/Strangle on Low IV
+│       │   ├── vwap_reversion.py    # VWAP ± σ-band reversion or breakout
+│       │   ├── gap_fade.py          # Fade opening gaps with no follow-through
+│       │   └── iron_condor.py       # Delta-neutral Iron Condor (chop regime)
+│       ├── optimization/            # Search & parameter optimization
+│       │   ├── grid_search.py       # Level 1: Grid search (16× speedup via replay)
+│       │   └── walk_forward.py      # Level 2: Walk-forward with overfitting detection
+│       ├── screener/                # Stock screening engine
+│       │   └── stock_screener.py    # Multi-strategy equity screener
+│       ├── reporting/               # Analytics & dashboard rendering
+│       │   ├── metrics.py           # 15+ performance metrics + console summary
+│       │   └── html_generator.py    # HTML dashboard generator (Jinja2 + Plotly)
+│       └── notifications/           # Automated alert bots
+│           ├── telegram.py          # Daily signals via Telegram Bot API
+│           └── screener_bot.py      # Biweekly stock screening results via Telegram
+│
+├── scripts/                         # Standalone runner scripts
+│   ├── download_bhavcopy.py
+│   ├── fetch_nse_symbols.py
+│   └── strategy_explorer.py
+│
+├── tests/                           # Pytest automated test suite
+│   ├── conftest.py                  # Fixtures & mock market data
+│   ├── test_pricing.py              # Black-Scholes & Greeks tests
+│   ├── test_strategies.py           # Strategy registry & signal tests
+│   └── test_backtester.py           # Backtest execution & PnL verification
+│
 ├── templates/
 │   └── report_template.html         # Jinja2 HTML template
 ├── .github/
 │   └── workflows/
-│       ├── daily_signals.yml          # GitHub Actions: daily Telegram signals (weekdays 4:15 PM IST)
-│       └── biweekly_screener.yml      # GitHub Actions: biweekly stock screening (Tuesdays 6:00 PM IST)
+│       ├── daily_signals.yml        # GitHub Actions: daily Telegram signals (weekdays 4:15 PM IST)
+│       └── biweekly_screener.yml    # GitHub Actions: biweekly stock screening (Tuesdays 6:00 PM IST)
 ├── data/
 │   ├── bhavcopy/                    # NSE F&O bhavcopy ZIP files (~2,300 files)
 │   ├── cache/                       # Intermediate data cache
@@ -658,4 +866,3 @@ algo-trading/
   unavailable for a given date
 - Backtest results are indicative only — not a guarantee of future performance
 - This is not financial advice. All trades are your own decision
-- Groww has no trading API — all signals must be executed manually

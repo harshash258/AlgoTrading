@@ -1,0 +1,65 @@
+name: Update Stock Fundamentals (Monthly)
+
+on:
+  schedule:
+    # Run on the 1st of every month at 00:00 UTC
+    - cron: '0 0 1 * *'
+  
+  workflow_dispatch:
+    # Allow manual trigger from GitHub UI
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # Give up to 2 hours for full 2,404 stock fetch
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Update fundamentals cache
+        run: |
+          python scripts/update_fundamentals.py \
+            --universe nse_tickers_template.txt
+
+      - name: Verify CSV generated
+        run: |
+          if [ -f "data/fundamentals.csv" ]; then
+            echo "✓ Fundamentals CSV created"
+            wc -l data/fundamentals.csv
+          else
+            echo "✗ Fundamentals CSV not found"
+            exit 1
+          fi
+
+      - name: Commit and push fundamentals.csv
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          if git diff --quiet data/fundamentals.csv; then
+            echo "No changes to fundamentals.csv"
+          else
+            git add data/fundamentals.csv
+            git commit -m "chore: update stock fundamentals cache [skip ci]"
+            git push origin HEAD:main
+          fi
+
+      - name: Report completion
+        if: always()
+        run: |
+          echo "Monthly fundamentals update completed"
+          echo "Next run: 1st of next month"

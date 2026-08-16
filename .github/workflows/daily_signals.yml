@@ -32,7 +32,9 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
 
       # Restore the market data CSVs from the previous run.
       # This means the runner only needs to fetch the last 1-2 days
@@ -51,7 +53,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python src/telegram_notify.py
+        run: python -m algo_trading.notifications.telegram
 
       # Always save the updated CSVs so the next run can use them.
       # The cache key includes run_id so a fresh entry is saved each time.

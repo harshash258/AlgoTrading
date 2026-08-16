@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 *.pyo
 *.pyd
@@ -33,6 +34,7 @@ secrets.py
 # IDE
 .vscode/
 .idea/
+.codex/
 *.code-workspace
 
 # OS

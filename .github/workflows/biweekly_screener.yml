@@ -1,10 +1,10 @@
-name: Biweekly Stock Screener
+name: Biweekly Stock Screener (Fast)
 
 on:
-  # Run every other Tuesday at 6:00 PM IST = 12:30 UTC
+  # Run on 1st and 15th of every month at 6:00 PM IST = 12:30 UTC
   # (after market close for the day)
   schedule:
-    - cron: "30 12 * * 2"
+    - cron: "30 12 1,15 * *"
 
   # Also allow manual trigger from GitHub UI or phone
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
 jobs:
   run-screener:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30  # Much faster now: cached fundamentals + bulk price fetch
 
     steps:
       - name: Checkout repository
@@ -22,36 +22,41 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Verify fundamentals cache exists
+        run: |
+          if [ ! -f "data/fundamentals.csv" ]; then
+            echo "✗ Fundamentals cache not found!"
+            echo "Please run: python scripts/update_fundamentals.py"
+            exit 1
+          fi
+          echo "✓ Fundamentals cache found"
+          wc -l data/fundamentals.csv
 
       - name: Create reports directory
         run: mkdir -p reports
 
-      - name: Run Cheap to Moon screening
+      - name: Run Cheap to Moon screening (cached + fast)
         run: |
-          python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt > reports/cheap_to_moon_log.txt 2>&1
-          echo "Cheap to Moon screening completed"
+          python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.txt 2>&1 | tee reports/cheap_to_moon_log.txt
+          echo "✓ Cheap to Moon screening completed"
 
-      - name: Run Multibagger screening
+      - name: Run Multibagger screening (cached + fast)
         run: |
-          python main.py screen --strategy multibagger --universe nse_tickers_template.txt > reports/multibagger_log.txt 2>&1
-          echo "Multibagger screening completed"
+          python main.py screen --strategy multibagger --universe nse_tickers_template.txt 2>&1 | tee reports/multibagger_log.txt
+          echo "✓ Multibagger screening completed"
 
       - name: Generate screener summary and send via Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python src/screener_telegram.py
+        run: python -m algo_trading.notifications.screener_bot
 
       - name: Upload reports as artifacts
         if: always()
