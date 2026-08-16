@@ -184,6 +184,18 @@ STRIKE_STEPS = {
 _SHORT_VOL_LABELS = {"Short Strangle (High IV)", "Iron Condor"}
 
 
+def _format_confidence(confidence: float | None) -> str:
+    """Format a normalized signal confidence as a percentage."""
+    if confidence is None:
+        return "N/A"
+    try:
+        score = float(confidence)
+    except (TypeError, ValueError):
+        return "N/A"
+    score = max(0.0, min(1.0, score))
+    return f"{score * 100:.0f}%"
+
+
 # ─────────────────────────────────────────────────────────────────
 # Telegram sender
 # ─────────────────────────────────────────────────────────────────
@@ -286,6 +298,7 @@ def _collect_signals(
                     "option_type"   : sig.option_type,
                     "expiry"        : sig.expiry,
                     "strike"        : sig.strike,
+                    "confidence"    : sig.confidence,
                     "meta"          : sig.meta,
                     "is_short"      : sig.direction == "short",
                 })
@@ -305,6 +318,7 @@ def _format_signal_block(sig_info: dict, spot: float, vix: float,
     is_short = sig_info["is_short"]
     meta     = sig_info["meta"]
     expiry   = sig_info["expiry"]
+    confidence = _format_confidence(sig_info.get("confidence", meta.get("confidence")))
 
     # Strike: use resolved strike if set, else ATM
     strike = int(sig_info["strike"]) if sig_info["strike"] > 0 else atm
@@ -345,6 +359,7 @@ def _format_signal_block(sig_info: dict, spot: float, vix: float,
         f"  <b>{action}</b>  [{label}]\n"
         f"  Strike  : {strike} {opt_type}   Expiry: {expiry_str}\n"
         f"  Spot    : {spot:,.0f}  |  VIX: {vix:.1f}%\n"
+        f"  Confidence: {confidence}\n"
         f"  Trigger : {trigger}\n"
         f"{leg_line}"
         f"  {sl_line}\n"
@@ -428,6 +443,12 @@ def _format_paired_block(group: dict, spot: float, vix: float,
     pe_sig    = group["pe"]
     meta      = ce_sig["meta"]
     expiry    = ce_sig["expiry"]
+    confidence = _format_confidence(
+        min(
+            ce_sig.get("confidence", meta.get("confidence", 1.0)),
+            pe_sig.get("confidence", pe_sig.get("meta", {}).get("confidence", 1.0)),
+        )
+    )
 
     ce_strike = int(ce_sig["strike"]) if ce_sig["strike"] > 0 else atm
     pe_strike = int(pe_sig["strike"]) if pe_sig["strike"] > 0 else atm
@@ -456,6 +477,7 @@ def _format_paired_block(group: dict, spot: float, vix: float,
         f"  {strike_line}\n"
         f"  Expiry  : {expiry_str}\n"
         f"  Spot    : {spot:,.0f}  |  VIX: {vix:.1f}%\n"
+        f"  Confidence: {confidence}\n"
         f"  Trigger : {trigger}\n"
         f"  {sl_line}\n"
         f"  {tgt_line}\n"
@@ -736,6 +758,7 @@ def generate_signal_message(strategy=None) -> str:
                     "option_type": s.option_type,
                     "expiry": s.expiry,
                     "strike": s.strike,
+                    "confidence": s.confidence,
                     "meta": s.meta,
                     "is_short": s.direction == "short",
                 } for s in entry_sigs],
