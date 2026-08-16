@@ -33,5 +33,9 @@ dev = [
 [project.scripts]
 algo-trading = "main:main"
 
+[tool.setuptools]
+py-modules = ["main"]
+
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["algo_trading*", "config*"]
