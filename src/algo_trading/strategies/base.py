@@ -33,6 +33,7 @@ class Signal:
     expiry      : Expiry date for the option
     signal_type : "entry" or "exit"
     exit_reason : Populated on exit signals — "target" | "sl" | "expiry" | "signal"
+    confidence  : Strategy confidence score from 0.0 to 1.0
     meta        : Optional dict for strategy-specific metadata
     """
     date        : date
@@ -43,6 +44,7 @@ class Signal:
     expiry      : Optional[date] = None
     signal_type : str = "entry" # "entry" | "exit"
     exit_reason : str = ""
+    confidence  : float = 1.0
     meta        : dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -52,6 +54,24 @@ class Signal:
             raise ValueError(f"option_type must be 'CE' or 'PE', got '{self.option_type}'")
         if self.signal_type not in ("entry", "exit"):
             raise ValueError(f"signal_type must be 'entry' or 'exit', got '{self.signal_type}'")
+        self.confidence = self._normalize_confidence(self.confidence)
+        self.meta["confidence"] = self.confidence
+
+    @staticmethod
+    def _normalize_confidence(value: float) -> float:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"confidence must be numeric, got '{value}'")
+        if not 0.0 <= score <= 1.0:
+            raise ValueError(f"confidence must be between 0.0 and 1.0, got {score}")
+        return score
+
+    def with_confidence(self, confidence: float) -> "Signal":
+        """Update confidence while keeping metadata in sync."""
+        self.confidence = self._normalize_confidence(confidence)
+        self.meta["confidence"] = self.confidence
+        return self
 
 
 class BaseStrategy(ABC):
@@ -97,6 +117,15 @@ class BaseStrategy(ABC):
         Override in subclass to expose strategy-specific config values.
         """
         return {"strategy": self.name}
+
+    def score_signal(self, signal: Signal) -> float:
+        """
+        Return a confidence score for a signal.
+
+        Strategies can override this to compute confidence from their own
+        indicators. If they already set Signal.confidence, the default keeps it.
+        """
+        return signal.confidence
 
     def on_trade_closed(self, trade) -> None:
         """

@@ -17,6 +17,25 @@ import pytest
 from types import SimpleNamespace
 
 
+class FixedSignalStrategy(BaseStrategy):
+    def __init__(self, name, signals, score=None):
+        self._name = name
+        self._signals = signals
+        self._score = score
+
+    @property
+    def name(self):
+        return self._name
+
+    def generate_signals(self, data, vix, current_date):
+        return list(self._signals)
+
+    def score_signal(self, signal):
+        if self._score is None:
+            return signal.confidence
+        return self._score
+
+
 def test_strategy_registry_populated():
     """Ensure built-in strategies are registered."""
     strategies = list_strategies()
@@ -45,6 +64,30 @@ def test_signal_validation_raises_value_error():
             direction="invalid",
             option_type="CE",
         )
+
+
+def test_signal_validation_rejects_invalid_confidence():
+    with pytest.raises(ValueError, match="confidence"):
+        Signal(
+            date=pd.Timestamp("2024-01-01").date(),
+            underlying="^NSEI",
+            direction="long",
+            option_type="CE",
+            confidence=1.5,
+        )
+
+
+def test_signal_confidence_is_mirrored_to_metadata():
+    signal = Signal(
+        date=pd.Timestamp("2024-01-01").date(),
+        underlying="^NSEI",
+        direction="long",
+        option_type="CE",
+        confidence=0.7,
+    )
+
+    assert signal.confidence == 0.7
+    assert signal.meta["confidence"] == 0.7
 
 
 def test_strategy_state_resets_when_trade_closes():
@@ -89,6 +132,83 @@ def test_combined_strategy_routes_trade_close_to_source_strategy():
 
     assert trend._prev_signal["^NSEI"] == "none"
     assert rsi._prev_signal["^NSEI"] == "long_ce"
+
+
+def test_combined_strategy_filters_low_confidence_entries(sample_market_data):
+    current_date = pd.Timestamp("2024-01-01").date()
+    low_signal = Signal(
+        date=current_date,
+        underlying="^NSEI",
+        direction="long",
+        option_type="CE",
+        confidence=0.3,
+    )
+    high_signal = Signal(
+        date=current_date,
+        underlying="^NSEI",
+        direction="long",
+        option_type="PE",
+        confidence=0.8,
+    )
+    combined = CombinedStrategy([
+        FixedSignalStrategy("low", [low_signal]),
+        FixedSignalStrategy("high", [high_signal]),
+    ], min_confidence=0.5)
+
+    df = sample_market_data["^NSEI"]
+    signals = combined.generate_signals(df, df["VIX"], current_date)
+
+    assert signals == [high_signal]
+    assert signals[0].meta["source_strategy"] == "high"
+
+
+def test_combined_strategy_keeps_exit_signals_below_confidence_threshold(sample_market_data):
+    current_date = pd.Timestamp("2024-01-01").date()
+    exit_signal = Signal(
+        date=current_date,
+        underlying="^NSEI",
+        direction="long",
+        option_type="CE",
+        signal_type="exit",
+        exit_reason="signal",
+        confidence=0.1,
+    )
+    combined = CombinedStrategy([
+        FixedSignalStrategy("exit_source", [exit_signal]),
+    ], min_confidence=0.5)
+
+    df = sample_market_data["^NSEI"]
+    signals = combined.generate_signals(df, df["VIX"], current_date)
+
+    assert signals == [exit_signal]
+    assert signals[0].meta["source_strategy"] == "exit_source"
+
+
+def test_combined_strategy_ranks_entries_by_confidence(sample_market_data):
+    current_date = pd.Timestamp("2024-01-01").date()
+    lower = Signal(
+        date=current_date,
+        underlying="^NSEI",
+        direction="long",
+        option_type="CE",
+        confidence=0.4,
+    )
+    higher = Signal(
+        date=current_date,
+        underlying="^NSEI",
+        direction="long",
+        option_type="PE",
+        confidence=0.9,
+    )
+    combined = CombinedStrategy([
+        FixedSignalStrategy("lower", [lower]),
+        FixedSignalStrategy("higher", [higher]),
+    ])
+
+    df = sample_market_data["^NSEI"]
+    signals = combined.generate_signals(df, df["VIX"], current_date)
+
+    assert signals == [higher, lower]
 
 
 def test_strategy_signal_generation(sample_market_data):
