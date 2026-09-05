@@ -30,7 +30,7 @@ Entry conditions:
 Exit:
   - IV drops below iv_exit_pct (premium decayed — take profit early)
   - Time stop: close position before theta-decay reverses
-  - Backtester handles individual SL/target on each leg
+  - Backtester handles structure-level SL/target across the four legs
 
 Four Signal objects are emitted per entry (one per leg).
 The backtester treats each as an independent Trade, so SL/target work
@@ -195,6 +195,7 @@ class IronCondorStrategy(BaseStrategy):
             entry_dt = self._entry_date.get(underlying)
             if entry_dt and (current_date - entry_dt).days >= self.time_stop_days:
                 # Exit all four legs
+                group_id = f"{underlying}:{self.name}"
                 for direction, opt_type in (
                     ("short", "CE"), ("long", "CE"),
                     ("short", "PE"), ("long", "PE"),
@@ -203,6 +204,8 @@ class IronCondorStrategy(BaseStrategy):
                         date=current_date, underlying=underlying,
                         direction=direction, option_type=opt_type,
                         signal_type="exit", exit_reason="time_stop",
+                        group_id=group_id,
+                        structure_type="iron_condor",
                         meta={"days_held": (current_date - entry_dt).days},
                     ))
                 self._in_trade[underlying]  = False
@@ -238,6 +241,7 @@ class IronCondorStrategy(BaseStrategy):
                 "adx"            : round(float(adx_val), 2) if adx_val is not None else "off",
                 "trigger"        : f"Iron Condor — IV pct={iv_percentile:.1f}% (high), chop regime",
             }
+            group_id = f"{underlying}:{self.name}:{current_date.isoformat()}"
 
             # Four legs: short body CE, long wing CE, short body PE, long wing PE
             for direction, opt_type, strike in (
@@ -256,6 +260,8 @@ class IronCondorStrategy(BaseStrategy):
                     strike=strike,
                     expiry=expiry,
                     signal_type="entry",
+                    group_id=group_id,
+                    structure_type="iron_condor",
                     meta={**meta_base, "leg": leg_tag},
                 ))
 
@@ -264,6 +270,7 @@ class IronCondorStrategy(BaseStrategy):
 
         # ── Exit: IV decayed / risk-off ───────────────────────────
         elif in_trade and iv_percentile <= self.iv_exit_pct:
+            group_id = f"{underlying}:{self.name}"
             for direction, opt_type in (
                 ("short", "CE"), ("long", "CE"),
                 ("short", "PE"), ("long", "PE"),
@@ -272,6 +279,8 @@ class IronCondorStrategy(BaseStrategy):
                     date=current_date, underlying=underlying,
                     direction=direction, option_type=opt_type,
                     signal_type="exit", exit_reason="signal",
+                    group_id=group_id,
+                    structure_type="iron_condor",
                     meta={
                         "iv_percentile" : round(float(iv_percentile), 1),
                         "reason"        : "IV decayed below exit threshold",

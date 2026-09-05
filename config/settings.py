@@ -77,7 +77,32 @@ RAW_DATA_DIR          = "data/raw"
 OPTIONS_DATA_DIR      = "data/options"
 
 BHAVCOPY_FOLDER       = "data/bhavcopy"  # activated — real NSE option chain data
-BHAVCOPY_SYMBOL       = "NIFTY"          # NSE symbol in bhavcopy files
+BHAVCOPY_SYMBOL       = "NIFTY"          # legacy default NSE symbol in bhavcopy files
+BHAVCOPY_SYMBOLS      = {
+    "^NSEI": "NIFTY",
+    "^NSEBANK": "BANKNIFTY",
+    "NIFTY_FIN_SERVICE.NS": "FINNIFTY",
+}
+EXECUTION_TIMING      = "next_open"      # next_open | same_day_close
+
+VIX_STALE_DAYS        = 3
+ALLOW_FALLBACK_VIX_BACKTEST = True
+
+MAX_STRIKE_DISTANCE = {
+    "^NSEI": 100.0,
+    "^NSEBANK": 200.0,
+    "NIFTY_FIN_SERVICE.NS": 100.0,
+}
+MIN_OPTION_VOLUME = {
+    "^NSEI": 100,
+    "^NSEBANK": 100,
+    "NIFTY_FIN_SERVICE.NS": 50,
+}
+MIN_OPTION_OI = {
+    "^NSEI": 1000,
+    "^NSEBANK": 1000,
+    "NIFTY_FIN_SERVICE.NS": 500,
+}
 
 # Target underlyings for backtesting
 UNDERLYINGS = [
@@ -92,6 +117,8 @@ STRIKE_STEPS = {
     "^NSEBANK":   100.0,
     "NIFTY_FIN_SERVICE.NS": 50.0,
 }
+
+MIN_REGIME_TRADES_FOR_RECOMMENDATION = 5
 
 # ─────────────────────────────────────────────
 # REPORTING & PATHS

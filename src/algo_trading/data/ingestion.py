@@ -186,6 +186,11 @@ def fetch_india_vix(
         df = fetch_ohlcv(config.INDIA_VIX_TICKER, start, end, force_refresh)
         vix = df[["Close"]].rename(columns={"Close": "VIX"})
         vix["VIX_decimal"] = vix["VIX"] / 100.0
+        latest_date = vix.index.max().date() if not vix.empty else None
+        vix["VIX_source"] = "live" if latest_date and latest_date >= end else "cache"
+        vix["VIX_asof"] = latest_date.isoformat() if latest_date else ""
+        if latest_date and (end - latest_date).days > config.VIX_STALE_DAYS:
+            vix["VIX_source"] = "stale"
         return vix
     except Exception as e:
         logger.warning(
@@ -197,7 +202,12 @@ def fetch_india_vix(
         # using business days so it aligns with the spot data index on join.
         idx = pd.date_range(start=str(start), end=str(end), freq="B")
         vix = pd.DataFrame(
-            {"VIX": _VIX_FALLBACK, "VIX_decimal": _VIX_FALLBACK / 100.0},
+            {
+                "VIX": _VIX_FALLBACK,
+                "VIX_decimal": _VIX_FALLBACK / 100.0,
+                "VIX_source": "fallback",
+                "VIX_asof": "",
+            },
             index=idx,
         )
         return vix
@@ -244,6 +254,10 @@ def get_combined_dataset(
         # Forward-fill VIX for days VIX data might be missing
         merged["VIX"] = merged["VIX"].ffill()
         merged["VIX_decimal"] = merged["VIX_decimal"].ffill()
+        if "VIX_source" in merged.columns:
+            merged["VIX_source"] = merged["VIX_source"].ffill().fillna("unknown")
+        if "VIX_asof" in merged.columns:
+            merged["VIX_asof"] = merged["VIX_asof"].ffill().fillna("")
         combined[ticker] = merged
 
     return combined
@@ -375,7 +389,7 @@ def load_bhavcopy(
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    keep_cols = [c for c in ["date","expiry","strike","opt_type","close","settle","oi","volume"] if c in df.columns]
+    keep_cols = [c for c in ["date","expiry","strike","opt_type","open","high","low","close","settle","oi","volume"] if c in df.columns]
     out = df[keep_cols].dropna(subset=["expiry", "strike", "close"])
     out = out[out["close"] > 0]
     return out.reset_index(drop=True)
@@ -470,6 +484,12 @@ class ChainLookup:
         self._dates    = np.array(sorted(chain["date"].dropna().unique()))
         self._expiries = np.array(sorted(chain["expiry"].dropna().unique()))
         self._strikes  = np.array(sorted(chain["strike"].dropna().unique()))
+        self._rows = (
+            chain
+            .set_index(["date", "expiry", "strike", "opt_type"])
+            .pipe(lambda df: df[~df.index.duplicated(keep="last")])
+            .sort_index()
+        )
 
     def nearest_expiry(self, trade_date, min_days: int = 0) -> pd.Timestamp | None:
         """Return nearest expiry at least min_days after trade_date."""
@@ -502,6 +522,49 @@ class ChainLookup:
             return float(val)
         except KeyError:
             return None
+
+    def row(self, trade_date, expiry, strike: float, opt_type: str) -> dict | None:
+        """Return normalised contract row metadata, or None if missing."""
+        try:
+            row = self._rows.loc[(
+                pd.Timestamp(trade_date),
+                pd.Timestamp(expiry),
+                float(strike),
+                opt_type,
+            )]
+            return row.to_dict()
+        except KeyError:
+            return None
+
+    def premium_with_meta(
+        self,
+        trade_date,
+        expiry,
+        strike: float,
+        opt_type: str,
+        price_preference: str = "close",
+    ) -> tuple[float | None, dict]:
+        """Look up a premium and describe which bhavcopy field supplied it."""
+        row = self.row(trade_date, expiry, strike, opt_type)
+        if not row:
+            return None, {"price_source": "missing"}
+        candidates = []
+        if price_preference == "open":
+            candidates = ["open", "close", "settle"]
+        else:
+            candidates = [self.price_col, "close", "settle", "open"]
+        for col in candidates:
+            val = row.get(col)
+            if pd.notna(val) and float(val) > 0:
+                return float(val), {
+                    "price_source": f"bhavcopy_{col}",
+                    "oi": row.get("oi"),
+                    "volume": row.get("volume"),
+                }
+        return None, {"price_source": "zero_or_missing", "oi": row.get("oi"), "volume": row.get("volume")}
+
+    def has_expiry(self, expiry) -> bool:
+        return pd.Timestamp(expiry) in self._expiries
 
     def smile(
         self,

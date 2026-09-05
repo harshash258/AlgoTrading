@@ -481,7 +481,11 @@ Metrics extracted per stock: P/E, P/B, ROCE, ROE, D/E ratio, promoter holding, p
 
 By default the system uses real historical NSE F&O option chain data from bhavcopy files
 (`BHAVCOPY_FOLDER = "data/bhavcopy"` in config.py) instead of synthetic Black-Scholes pricing.
-This significantly improves backtest accuracy for NIFTY options specifically.
+This improves option-price realism for each configured index. The backtester maps
+Yahoo underlyings to NSE option symbols with `BHAVCOPY_SYMBOLS`, currently:
+`^NSEI -> NIFTY`, `^NSEBANK -> BANKNIFTY`, and
+`NIFTY_FIN_SERVICE.NS -> FINNIFTY`. Each symbol gets its own cached chain lookup,
+so BANKNIFTY and FINNIFTY trades are never priced from NIFTY contracts.
 
 ```bash
 # Download full history (2015 to yesterday, ~2,300 files)
@@ -503,8 +507,26 @@ python main.py bhavcopy --verify
 Files are saved to `data/bhavcopy/` as `fo<DD><MON><YYYY>bhav.csv.zip`.
 Set `BHAVCOPY_FOLDER = None` in config.py to use synthetic Black-Scholes (faster, less accurate).
 
-The `ChainLookup` class provides fast (date, expiry, strike, option_type) → premium lookup.
-On any date without bhavcopy data, the system silently falls back to Black-Scholes.
+The `ChainLookup` class provides fast `(date, expiry, strike, option_type)` premium lookup
+plus open/close/OI/volume metadata. Backtests use next-open option `OPEN` prices when
+available and fall back to close/settle, then Black-Scholes, with the price source recorded
+on each trade.
+
+### Backtest Execution Semantics
+
+Daily strategy signals are generated after a completed market bar. By default
+`EXECUTION_TIMING = "next_open"`:
+
+- A signal generated on day T is entered on the next valid trading day at the option open.
+- Trade records include both `signal_date` and `entry_date`.
+- If the next trading day is outside the backtest window, the signal remains unexecuted and
+  is not counted as a realized trade.
+- `same_day_close` remains available only as an explicit legacy/test execution mode.
+
+Multi-leg strategies now execute as one structure. Straddles, strangles, short strangles,
+and iron condors share `group_id` and `structure_type`; max open positions, stop-loss,
+target, and capital updates are applied at the structure level. CSV/report rows still include
+leg-level details for auditability.
 
 ---
 
@@ -517,8 +539,15 @@ GitHub Actions sends signals every weekday at 4:15 PM IST (45 min after NSE clos
 - Long straddle/strangle volatility trades as one paired setup where CE + PE are both required
 - Strike, expiry, spot, India VIX, trigger label
 - Stop-loss %, target %, risk amount in ₹, lot size
+- Contract validation before alerting: expiry exists, strike is listed or near enough,
+  premium is non-zero, and OI/volume meet per-underlying thresholds
 - Conflict detection: if MA and RSI disagree on the same underlying, both signals are shown
   with source labels so you can decide
+
+Volatility strategies fail closed for live alerts when India VIX is `fallback` or `stale`.
+Suppressed strategies and contract-validation reasons are included in the Telegram summary.
+Because bhavcopy does not include bid/ask, liquidity checks use premium, OI, and traded
+volume proxies and label that limitation.
 
 **Strategy used by the bot:** `CombinedStrategy(TrendFollowing + RSI)` with current config
 params (fast MA 25, slow MA 75, RSI 14, oversold 25, overbought 65).
@@ -543,7 +572,8 @@ python src/telegram_notify.py
 GitHub Actions can replay the completed trading week every Saturday at 9:00 AM IST and email
 a strategy scoreboard plus trade evidence. This is the feedback loop for tuning thresholds:
 daily Telegram alerts propose trades; the weekly review shows which strategies actually paid,
-which exits fired, and where IV/target/stop parameters need work.
+which exits fired, and where IV/target/stop parameters need work. Friday signals that would
+execute after the reviewed week are left pending and are not counted as realized trades.
 
 ```bash
 # Generate files and send email when SMTP env vars are configured
@@ -560,6 +590,10 @@ Outputs are saved under `reports/weekly/`:
 - `weekly_review_<week>.html` — readable email/report
 - `weekly_trades_<week>.csv` — closed-trade evidence for analysis
 - `weekly_metrics_<week>.csv` — strategy-level scoreboard
+
+Weekly HTML and CSV outputs include structure metadata (`group_id`, `structure_type`,
+leg labels), price source, VIX source, and regime buckets. The report separately counts
+fallback/stale-VIX trades and ranks performance by regime with insufficient-sample warnings.
 
 Add these GitHub repository secrets to enable email:
 - `SMTP_HOST`
@@ -675,6 +709,11 @@ All parameters live in `config.py`. Key settings:
 | `SLIPPAGE_PCT`             | 1.5%    | Adverse slippage on entry and exit            |
 | `RISK_FREE_RATE`           | 6.5%    | Annualised (91-day T-bill proxy)              |
 | `DAYS_BEFORE_EXPIRY_EXIT`  | 1       | Close all positions N days before expiry      |
+| `EXECUTION_TIMING`         | `next_open` | Execute after-close signals at next open  |
+| `BHAVCOPY_SYMBOLS`         | per index | Map Yahoo tickers to NSE option symbols    |
+| `VIX_STALE_DAYS`           | 3       | Mark cached VIX stale after this many days    |
+| `MIN_OPTION_VOLUME`        | per index | Live signal volume threshold proxy          |
+| `MIN_OPTION_OI`            | per index | Live signal OI threshold proxy              |
 
 ### Strategy Parameters
 
@@ -705,7 +744,8 @@ All parameters live in `config.py`. Key settings:
 | Parameter          | Default                                    | Description                  |
 |--------------------|--------------------------------------------|------------------------------|
 | `BHAVCOPY_FOLDER`  | `data/bhavcopy`                            | NSE bhavcopy ZIP folder      |
-| `BHAVCOPY_SYMBOL`  | `NIFTY`                                    | Symbol filter in bhavcopy    |
+| `BHAVCOPY_SYMBOL`  | `NIFTY`                                    | Legacy default symbol filter |
+| `BHAVCOPY_SYMBOLS` | `NIFTY`, `BANKNIFTY`, `FINNIFTY`           | Per-underlying chain mapping |
 | `UNDERLYINGS`      | `^NSEI`, `^NSEBANK`, `NIFTY_FIN_SERVICE.NS`| Tickers to trade             |
 
 ---
@@ -761,6 +801,14 @@ All JS, CSS, and Plotly data is embedded inline — no internet required to open
   `trade.entry_meta["source_strategy"]`.
 - Signal validation now raises `ValueError` instead of relying on Python `assert`, so validation
   still runs under optimized Python.
+- Backtests now default to next-open execution and record `signal_date` separately from
+  `entry_date`.
+- Multi-leg option strategies are managed as one position for max-open-position, exit, and
+  capital accounting while preserving leg-level trade rows.
+- Live Telegram signals fail closed on fallback/stale VIX for volatility strategies and validate
+  expiry, strike, premium, OI, and volume before alerting.
+- Weekly review now includes regime performance, fallback/stale VIX counts, and grouped
+  structure metadata.
 
 ---
 
@@ -784,12 +832,16 @@ Signal(
     strike      = 0.0,                # 0 = ATM; backtester resolves it
     expiry      = next_expiry(...),   # expiry date
     signal_type = "entry",            # "entry" | "exit"
+    group_id    = "optional-group",   # shared by multi-leg structures
+    structure_type = "single",        # single | straddle | strangle | short_strangle | iron_condor
     meta        = {"trigger": "..."}  # any metadata for reports
 )
 ```
 
 For multi-leg strategies (straddle, iron condor): emit multiple `Signal` objects in one
-`generate_signals()` call. The backtester handles each as an independent `Trade`.
+`generate_signals()` call with the same `group_id` and `structure_type`. The backtester
+opens one grouped position, applies structure-level exits, and still writes one `Trade`
+row per leg.
 
 If the strategy stores local position state such as `_prev_signal`, `_entry_date`, `_pending`, or
 `_cross_counter`, the base `on_trade_closed(trade)` hook will reset those fields when a matching
@@ -898,6 +950,8 @@ algo-trading/
 ## Disclaimer
 
 - Options pricing falls back to Black-Scholes with India VIX as IV proxy when bhavcopy is
-  unavailable for a given date
+  unavailable for a given date; fallback usage is tagged in reports
+- Live volatility alerts are suppressed when VIX is fallback/stale, but backtests may include
+  tagged fallback/stale-VIX trades for historical continuity
 - Backtest results are indicative only — not a guarantee of future performance
 - This is not financial advice. All trades are your own decision

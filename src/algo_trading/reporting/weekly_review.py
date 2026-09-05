@@ -19,6 +19,7 @@ import algo_trading.core.backtester as _backtester_module
 from algo_trading.core.backtester import Backtester
 from algo_trading.data.ingestion import ChainLookup, get_combined_dataset, load_bhavcopy
 from algo_trading.notifications.telegram import TICKER_NAMES, _all_strategies
+from algo_trading.core.regime import regime_for_trade, summarize_regime_performance
 from algo_trading.reporting.metrics import compute_metrics, trades_to_dataframe
 
 
@@ -71,7 +72,9 @@ def build_weekly_review(
     trade_frames: list[pd.DataFrame] = []
     metric_rows: list[dict] = []
     previous_chain_lookup = _backtester_module._chain_lookup
-    _backtester_module._chain_lookup = _weekly_chain_lookup(week_start, week_end)
+    previous_chain_lookups = dict(_backtester_module._chain_lookups)
+    _backtester_module._chain_lookup = None
+    _backtester_module._chain_lookups = _weekly_chain_lookups(week_start, week_end)
 
     try:
         for strategy_label, strategy in _all_strategies():
@@ -108,13 +111,19 @@ def build_weekly_review(
             if trades:
                 df = trades_to_dataframe(trades)
                 df.insert(0, "Strategy", strategy_label)
-                df["Underlying Name"] = df["Underlying"].map(TICKER_NAMES).fillna(df["Underlying"])
+                df["underlying_name"] = df["underlying"].map(TICKER_NAMES).fillna(df["underlying"])
+                df["Regime"] = [regime_for_trade(trade, data) for trade in trades]
                 trade_frames.append(df)
     finally:
         _backtester_module._chain_lookup = previous_chain_lookup
+        _backtester_module._chain_lookups = previous_chain_lookups
 
     trades_df = pd.concat(trade_frames, ignore_index=True) if trade_frames else pd.DataFrame()
     metrics_df = pd.DataFrame(metric_rows)
+    regime_df = summarize_regime_performance(
+        trades_df,
+        min_trades=getattr(config, "MIN_REGIME_TRADES_FOR_RECOMMENDATION", 5),
+    )
     output_dir = Path(config.WEEKLY_REVIEW_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -125,7 +134,7 @@ def build_weekly_review(
 
     trades_df.to_csv(csv_path, index=False)
     metrics_df.to_csv(summary_path, index=False)
-    html = render_weekly_html(week_start, week_end, metrics_df, trades_df)
+    html = render_weekly_html(week_start, week_end, metrics_df, trades_df, regime_df)
     html_path.write_text(html, encoding="utf-8")
 
     result = WeeklyReviewResult(
@@ -135,7 +144,7 @@ def build_weekly_review(
         csv_path=csv_path,
         summary_path=summary_path,
         total_trades=int(len(trades_df)),
-        net_pnl=float(trades_df["P&L ₹"].sum()) if not trades_df.empty else 0.0,
+        net_pnl=float(trades_df["net_pnl"].sum()) if not trades_df.empty else 0.0,
     )
 
     if send_email:
@@ -153,6 +162,7 @@ def render_weekly_html(
     week_end: date,
     metrics_df: pd.DataFrame,
     trades_df: pd.DataFrame,
+    regime_df: pd.DataFrame | None = None,
 ) -> str:
     top = metrics_df.sort_values(
         ["Profit Factor", "Net P&L"],
@@ -160,10 +170,11 @@ def render_weekly_html(
         na_position="last",
     ).head(8)
 
-    total_pnl = float(trades_df["P&L ₹"].sum()) if not trades_df.empty else 0.0
+    total_pnl = float(trades_df["net_pnl"].sum()) if not trades_df.empty else 0.0
     total_trades = len(trades_df)
-    wins = int((trades_df["P&L ₹"] > 0).sum()) if not trades_df.empty else 0
+    wins = int((trades_df["net_pnl"] > 0).sum()) if not trades_df.empty else 0
     win_rate = (wins / total_trades * 100) if total_trades else 0.0
+    fallback_vix = int(trades_df["vix_source"].isin(["fallback", "stale"]).sum()) if "vix_source" in trades_df else 0
 
     def table(df: pd.DataFrame) -> str:
         if df.empty:
@@ -172,15 +183,17 @@ def render_weekly_html(
 
     recent_cols = [
         c for c in [
-            "Strategy", "Entry Date", "Exit Date", "Underlying Name", "Type",
-            "Direction", "Strike", "Expiry", "P&L ₹", "P&L %",
-            "Held Days", "Exit Reason", "Entry IV %",
+            "Strategy", "signal_date", "entry_date", "exit_date", "underlying_name",
+            "structure_type", "leg_label", "option_type", "direction", "strike",
+            "expiry", "net_pnl", "pnl_pct", "held_days", "exit_reason",
+            "entry_iv", "pricing_source", "vix_source", "Regime",
         ] if c in trades_df.columns
     ]
     recent = trades_df[recent_cols].sort_values(
-        ["Exit Date", "Strategy"],
+        ["exit_date", "Strategy"],
         ascending=[False, True],
     ).head(50) if not trades_df.empty else trades_df
+    regime_df = regime_df if regime_df is not None else pd.DataFrame()
 
     return f"""<!doctype html>
 <html lang="en">
@@ -208,9 +221,12 @@ def render_weekly_html(
     <div class="card"><div class="label">Closed Trades</div><div class="value">{total_trades}</div></div>
     <div class="card"><div class="label">Net P&L</div><div class="value">₹{total_pnl:,.0f}</div></div>
     <div class="card"><div class="label">Win Rate</div><div class="value">{win_rate:.1f}%</div></div>
+    <div class="card"><div class="label">Fallback/Stale VIX Legs</div><div class="value">{fallback_vix}</div></div>
   </div>
   <h2>Strategy Scoreboard</h2>
   {table(top)}
+  <h2>Regime Performance</h2>
+  {table(regime_df)}
   <h2>Recent Closed Trades</h2>
   {table(recent)}
   <p class="muted">Use the CSV attachments for deeper threshold and parameter tuning.</p>
@@ -294,13 +310,17 @@ class _NoChainLookup:
 
 
 def _weekly_chain_lookup(week_start: date, week_end: date):
+    lookups = _weekly_chain_lookups(week_start, week_end)
+    return next(iter(lookups.values()), _NoChainLookup())
+
+
+def _weekly_chain_lookups(week_start: date, week_end: date) -> dict[str, ChainLookup | None]:
     folder = getattr(config, "BHAVCOPY_FOLDER", None)
     if not folder:
-        return _NoChainLookup()
-
+        return {}
     bhavcopy_dir = Path.cwd() / folder
     if not bhavcopy_dir.is_dir():
-        return _NoChainLookup()
+        return {}
 
     paths = []
     day = week_start
@@ -313,20 +333,19 @@ def _weekly_chain_lookup(week_start: date, week_end: date):
         day += timedelta(days=1)
 
     if not paths:
-        return _NoChainLookup()
+        return {}
 
-    frames = []
-    for path in paths:
-        try:
-            frames.append(load_bhavcopy(str(path), symbol=config.BHAVCOPY_SYMBOL, verbose=False))
-        except Exception:
-            continue
-
-    if not frames:
-        return _NoChainLookup()
-
-    chain = pd.concat(frames, ignore_index=True)
-    return ChainLookup(chain)
+    lookups: dict[str, ChainLookup | None] = {}
+    symbols = set(getattr(config, "BHAVCOPY_SYMBOLS", {}).values()) or {config.BHAVCOPY_SYMBOL}
+    for symbol in symbols:
+        frames = []
+        for path in paths:
+            try:
+                frames.append(load_bhavcopy(str(path), symbol=symbol, verbose=False))
+            except Exception:
+                continue
+        lookups[symbol] = ChainLookup(pd.concat(frames, ignore_index=True)) if frames else None
+    return lookups
 
 
 def parse_date(value: str | None) -> date | None:

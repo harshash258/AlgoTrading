@@ -25,6 +25,7 @@ import requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 from algo_trading.data.ingestion import get_combined_dataset
+from algo_trading.core.backtester import _get_chain_lookup
 
 # ── All strategies ────────────────────────────────────────────────
 from algo_trading.strategies.trend_following import TrendFollowingStrategy
@@ -188,6 +189,12 @@ STRIKE_STEPS = {
 
 # Short-vol strategies sell premium — use sell SL/target params
 _SHORT_VOL_LABELS = {"Short Strangle (High IV)", "Iron Condor"}
+_VOLATILITY_LABELS = {
+    "Short Strangle (High IV)",
+    "Long Straddle (Low IV)",
+    "Long Strangle (Low IV)",
+    "Iron Condor",
+}
 
 
 def _next_trading_day(from_date: date) -> date:
@@ -245,7 +252,7 @@ def _send_in_parts(messages: list[str], token: str, chat_id: str) -> bool:
 def _collect_signals(
     data: dict,
     today: date,
-) -> dict:
+) -> tuple[dict, list[str]]:
     """
     Run all strategies on today's data.
 
@@ -272,6 +279,7 @@ def _collect_signals(
     """
     strategies = _all_strategies()
     collected: dict = {}
+    suppressed: list[str] = []
 
     for strategy_label, strategy in strategies:
         for ticker, df in data.items():
@@ -279,6 +287,12 @@ def _collect_signals(
             df_copy.attrs["ticker"] = ticker
             vix_series = df_copy.get("VIX", None)
             if vix_series is None:
+                continue
+            vix_source = str(df_copy.get("VIX_source", ["unknown"]).iloc[-1]) if "VIX_source" in df_copy else "unknown"
+            if strategy_label in _VOLATILITY_LABELS and vix_source in {"fallback", "stale"}:
+                suppressed.append(
+                    f"{TICKER_NAMES.get(ticker, ticker)} {strategy_label}: VIX source is {vix_source}; volatility signal suppressed."
+                )
                 continue
 
             try:
@@ -314,7 +328,71 @@ def _collect_signals(
                     "is_short"      : sig.direction == "short",
                 })
 
-    return collected
+    return collected, suppressed
+
+
+def _validate_contract_signal(ticker: str, sig: dict, spot: float, atm: int, today: date) -> str:
+    """Return empty string when a live signal's option contract is tradable."""
+    lookup = _get_chain_lookup(ticker)
+    if lookup is None or not lookup.has_data_for(today):
+        return "no current bhavcopy chain data for contract validation"
+
+    expiry = sig.get("expiry")
+    if not expiry:
+        return "missing expiry"
+    if hasattr(lookup, "has_expiry") and not lookup.has_expiry(expiry):
+        return f"expiry {expiry} not found in chain"
+
+    requested_strike = float(sig.get("strike") or atm)
+    nearest = lookup.nearest_strike(requested_strike)
+    max_distance = config.MAX_STRIKE_DISTANCE.get(ticker, 100.0)
+    if abs(nearest - requested_strike) > max_distance:
+        return f"nearest strike {nearest:g} is beyond max distance {max_distance:g}"
+
+    if hasattr(lookup, "premium_with_meta"):
+        premium, meta = lookup.premium_with_meta(today, expiry, nearest, sig["option_type"], "close")
+    else:
+        premium = lookup.premium(today, expiry, nearest, sig["option_type"])
+        meta = {}
+    if premium is None or premium <= 0:
+        return "premium is zero or unavailable"
+
+    volume = meta.get("volume")
+    oi = meta.get("oi")
+    min_volume = config.MIN_OPTION_VOLUME.get(ticker, 0)
+    min_oi = config.MIN_OPTION_OI.get(ticker, 0)
+    if volume is not None and float(volume) < min_volume:
+        return f"volume {float(volume):.0f} below threshold {min_volume}"
+    if oi is not None and float(oi) < min_oi:
+        return f"OI {float(oi):.0f} below threshold {min_oi}"
+
+    sig["strike"] = nearest
+    sig["meta"] = {
+        **sig.get("meta", {}),
+        "validation": "bhavcopy premium/OI/volume proxy; bid/ask unavailable",
+        "validated_premium": round(float(premium), 2),
+        "validated_volume": volume,
+        "validated_oi": oi,
+    }
+    return ""
+
+
+def _validate_collected_signals(data: dict, collected: dict, today: date) -> tuple[dict, list[str]]:
+    filtered: dict = {}
+    suppressed: list[str] = []
+    for ticker, ticker_data in collected.items():
+        valid_sigs = []
+        for sig in ticker_data["sigs"]:
+            reason = _validate_contract_signal(ticker, sig, ticker_data["spot"], ticker_data["atm"], today)
+            if reason:
+                suppressed.append(
+                    f"{ticker_data['name']} {sig['strategy_label']} {sig['option_type']}: {reason}"
+                )
+            else:
+                valid_sigs.append(sig)
+        if valid_sigs:
+            filtered[ticker] = {**ticker_data, "sigs": valid_sigs}
+    return filtered, suppressed
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -522,7 +600,7 @@ def _format_ticker_block(ticker: str, ticker_data: dict) -> str:
     notes = []
     if paired_groups:
         pair_labels = ", ".join(_html_text(g["label"]) for g in paired_groups)
-        notes.append(f"  📐 Vol trade: CE + PE is one paired setup ({pair_labels})")
+        notes.append(f"  📐 Vol trade: CE + PE is intentional, not a conflict ({pair_labels})")
     if len(ce_strategies) >= 2:
         notes.append(
             f"  ✅ {len(ce_strategies)} strategies agree: "
@@ -667,7 +745,9 @@ def generate_signal_messages() -> list[str]:
             )
 
     # ── Collect all signals ───────────────────────────────────────
-    collected = _collect_signals(data, today)
+    collected, suppressed = _collect_signals(data, today)
+    collected, validation_suppressed = _validate_collected_signals(data, collected, today)
+    suppressed.extend(validation_suppressed)
 
     # ── Count active strategies ───────────────────────────────────
     n_strategies = len(_all_strategies())
@@ -688,13 +768,17 @@ def generate_signal_messages() -> list[str]:
     )
     if warnings:
         header += "\n\n" + "\n".join(warnings)
+    if suppressed:
+        header += "\n\n<b>Suppressed before alert</b>\n" + "\n".join(
+            f"• {_html_text(item)}" for item in suppressed[:12]
+        )
 
     # ── Build footer ──────────────────────────────────────────────
     footer = (
         f"\n\n{'─' * 34}\n"
         f"Execute manually on Groww at market open.\n"
         f"Set GTT stop-loss immediately after entry.\n"
-        f"Confirm strike availability before placing order."
+        f"Contracts validated with bhavcopy premium/OI/volume proxies when available."
     )
 
     # ── No signals case ───────────────────────────────────────────
@@ -755,6 +839,9 @@ def generate_signal_message(strategy=None) -> str:
             vix_series = df.get("VIX", None)
             if vix_series is None:
                 continue
+            vix_source = str(df.get("VIX_source", ["unknown"]).iloc[-1]) if "VIX_source" in df else "unknown"
+            if strategy_label in _VOLATILITY_LABELS and vix_source in {"fallback", "stale"}:
+                continue
             sigs = strategy.generate_signals(df, vix_series, today)
             entry_sigs = [s for s in sigs if s.signal_type == "entry"]
             if not entry_sigs:
@@ -787,6 +874,14 @@ def generate_signal_message(strategy=None) -> str:
 
         if not grouped:
             return header + "\n\nNo signals today. Stay out of the market."
+
+        grouped, suppressed = _validate_collected_signals(data, grouped, today)
+        if suppressed:
+            header += "\n\n<b>Suppressed before alert</b>\n" + "\n".join(
+                f"• {_html_text(item)}" for item in suppressed[:12]
+            )
+        if not grouped:
+            return header + "\n\nNo valid executable signals today. Stay out of the market."
 
         blocks = [_format_ticker_block(t, d) for t, d in grouped.items()]
         body   = "\n\n" + ("\n\n" + "═" * 34 + "\n\n").join(blocks)

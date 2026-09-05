@@ -81,6 +81,7 @@ class MeanReversionStrategy(BaseStrategy):
 
         if not in_trade and iv_percentile >= self.iv_entry_pct:
             # Enter short strangle — sell OTM CE and OTM PE
+            group_id = f"{underlying}:{self.name}:{current_date.isoformat()}"
             signals.append(Signal(
                 date=current_date,
                 underlying=underlying,
@@ -89,6 +90,8 @@ class MeanReversionStrategy(BaseStrategy):
                 strike=0.0,  # backtester will call get_strike_by_delta
                 expiry=expiry,
                 signal_type="entry",
+                group_id=group_id,
+                structure_type="short_strangle",
                 meta={
                     "iv_percentile": round(float(iv_percentile), 1),
                     "current_vix":   round(float(current_vix), 2),
@@ -104,6 +107,8 @@ class MeanReversionStrategy(BaseStrategy):
                 strike=0.0,
                 expiry=expiry,
                 signal_type="entry",
+                group_id=group_id,
+                structure_type="short_strangle",
                 meta={
                     "iv_percentile": round(float(iv_percentile), 1),
                     "current_vix":   round(float(current_vix), 2),
@@ -115,6 +120,7 @@ class MeanReversionStrategy(BaseStrategy):
 
         elif in_trade and iv_percentile <= self.iv_exit_pct:
             # Exit strangle — IV has reverted
+            group_id = f"{underlying}:{self.name}"
             for opt_type in ("CE", "PE"):
                 signals.append(Signal(
                     date=current_date,
@@ -123,6 +129,8 @@ class MeanReversionStrategy(BaseStrategy):
                     option_type=opt_type,
                     signal_type="exit",
                     exit_reason="signal",
+                    group_id=group_id,
+                    structure_type="short_strangle",
                     meta={
                         "iv_percentile": round(float(iv_percentile), 1),
                         "reason": "IV reverted below exit threshold",

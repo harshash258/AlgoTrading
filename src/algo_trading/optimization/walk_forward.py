@@ -39,6 +39,7 @@ import config
 
 from algo_trading.data.ingestion import get_combined_dataset, load_bhavcopy_folder, ChainLookup
 from algo_trading.core.backtester import Backtester
+from algo_trading.core.regime import classify_regime
 from algo_trading.reporting.metrics import compute_metrics
 from algo_trading.strategies.trend_following import TrendFollowingStrategy
 from algo_trading.strategies.rsi_strategy import RSIStrategy
@@ -183,6 +184,8 @@ def _run_period(
             equity_curve = bt.get_equity_curve()
 
         metrics = compute_metrics(trades, equity_curve, config.STARTING_CAPITAL)
+        first_df = next(iter(period_data.values()))
+        metrics["regime"] = classify_regime(first_df).primary
         return metrics
 
     except Exception as e:
@@ -268,6 +271,7 @@ def _walk_forward_single(
             "test_win_rate"  : round(test_metrics.get("win_rate_pct", 0.0), 2),
             "test_max_dd"    : round(test_metrics.get("max_drawdown_pct", 0.0), 2),
             "test_trades"    : test_metrics.get("total_trades", 0),
+            "regime"         : test_metrics.get("regime", "unknown"),
             "fast_ma"        : int(params["fast_ma"]),
             "slow_ma"        : int(params["slow_ma"]),
             "rsi_oversold"   : int(params["rsi_oversold"]),
@@ -317,6 +321,7 @@ def _walk_forward_single(
         "std_oos_pf"      : round(std_oos_pf, 3),
         "mean_is_pf"      : round(mean_is_pf, 3),
         "overfit_flag"    : overfit_flag,
+        "total_test_trades": int(sum(row["test_trades"] for row in fold_rows)),
     }
 
     # Print fold summary
@@ -440,6 +445,7 @@ def run_walk_forward(
 
     # ── Print summary table ───────────────────────────────────────
     _print_wf_summary(all_summaries)
+    _print_regime_summary(results_df)
 
     # ── Print recommendation ──────────────────────────────────────
     _print_recommendation(all_summaries)
@@ -503,6 +509,7 @@ def _print_recommendation(summaries: list[dict]) -> None:
         candidates,
         key=lambda s: (s["consistency_pct"], s["mean_oos_pf"]),
     )
+    min_trades = getattr(config, "MIN_REGIME_TRADES_FOR_RECOMMENDATION", 5)
 
     n_folds = best["total_folds"]
     n_profit = best["profitable_folds"]
@@ -512,6 +519,15 @@ def _print_recommendation(summaries: list[dict]) -> None:
     print(f"\n{'='*70}")
     print("  RECOMMENDATION")
     print(f"{'='*70}")
+    if best.get("total_test_trades", 0) < min_trades:
+        print(
+            "  No automatic parameter recommendation: "
+            f"best set has {best.get('total_test_trades', 0)} OOS trades, "
+            f"below minimum sample {min_trades}."
+        )
+        print("  Inspect MA/RSI and SL/target sensitivity by regime before changing config.")
+        print(f"{'='*70}\n")
+        return
     print(
         f"  RECOMMENDED PARAMS: "
         f"fast_ma={int(best['fast_ma'])}, slow_ma={int(best['slow_ma'])}, "
@@ -523,6 +539,32 @@ def _print_recommendation(summaries: list[dict]) -> None:
         f"({best['consistency_pct']:.1f}% profitable), "
         f"avg OOS profit_factor={oos_pf:.3f}{overfit_note}"
     )
+    print(f"{'='*70}\n")
+
+
+def _print_regime_summary(results_df: pd.DataFrame) -> None:
+    if results_df.empty or "regime" not in results_df:
+        return
+    grouped = (
+        results_df
+        .groupby("regime")
+        .agg(
+            folds=("fold", "count"),
+            trades=("test_trades", "sum"),
+            avg_pf=("test_pf", "mean"),
+            avg_return=("test_return_pct", "mean"),
+        )
+        .reset_index()
+    )
+    print(f"\n{'='*70}")
+    print("  REGIME SUMMARY")
+    print(f"{'='*70}")
+    for row in grouped.to_dict(orient="records"):
+        print(
+            f"  {row['regime']}: folds={int(row['folds'])}, "
+            f"trades={int(row['trades'])}, avg_pf={row['avg_pf']:.3f}, "
+            f"avg_return={row['avg_return']:+.2f}%"
+        )
     print(f"{'='*70}\n")
 
 
