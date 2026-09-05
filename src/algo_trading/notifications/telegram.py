@@ -17,6 +17,7 @@ Environment variables required:
 import os
 import sys
 import logging
+from html import escape
 from datetime import date, timedelta
 
 import requests
@@ -39,6 +40,11 @@ from algo_trading.strategies.iron_condor import IronCondorStrategy
 
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
+
+
+def _html_text(value) -> str:
+    """Escape dynamic text before embedding it in Telegram HTML messages."""
+    return escape(str(value), quote=False)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -184,6 +190,22 @@ STRIKE_STEPS = {
 _SHORT_VOL_LABELS = {"Short Strangle (High IV)", "Iron Condor"}
 
 
+def _next_trading_day(from_date: date) -> date:
+    """Return the next weekday after from_date."""
+    next_day = from_date + timedelta(days=1)
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    return next_day
+
+
+def _execution_note(today: date) -> str:
+    """Human-readable execution date for next market open."""
+    next_day = _next_trading_day(today)
+    if next_day == today + timedelta(days=1):
+        return f"execute {next_day.strftime('%d %b %Y')} at open"
+    return f"execute next market open: {next_day.strftime('%d %b %Y')}"
+
+
 # ─────────────────────────────────────────────────────────────────
 # Telegram sender
 # ─────────────────────────────────────────────────────────────────
@@ -202,6 +224,8 @@ def send_telegram(message: str, token: str, chat_id: str) -> bool:
         return True
     except Exception as e:
         print(f"Telegram send failed: {e}")
+        if "resp" in locals():
+            print(f"Telegram response: {resp.status_code} {resp.text}")
         return False
 
 
@@ -337,8 +361,11 @@ def _format_signal_block(sig_info: dict, spot: float, vix: float,
     risk_amt  = config.STARTING_CAPITAL * config.RISK_PER_TRADE_PCT / 100
     lots_hint = config.LOT_SIZES.get(ticker, config.DEFAULT_LOT_SIZE)
 
+    label = _html_text(label)
+    trigger = _html_text(trigger)
+
     # Iron condor leg tag
-    leg = meta.get("leg", "")
+    leg = _html_text(meta.get("leg", ""))
     leg_line = f"  Leg     : {leg}\n" if leg else ""
 
     return (
@@ -431,11 +458,12 @@ def _format_paired_block(group: dict, spot: float, vix: float,
 
     ce_strike = int(ce_sig["strike"]) if ce_sig["strike"] > 0 else atm
     pe_strike = int(pe_sig["strike"]) if pe_sig["strike"] > 0 else atm
+    label = _html_text(label)
     pair_type = meta.get("pair_type", meta.get("variant", "straddle")).lower()
-    display_pair_type = pair_type.upper()
+    display_pair_type = _html_text(pair_type.upper())
 
     expiry_str = expiry.strftime("%d %b '%y") if expiry else "—"
-    trigger    = meta.get("trigger", "vol cheap")
+    trigger    = _html_text(meta.get("trigger", "vol cheap"))
 
     risk_amt  = config.STARTING_CAPITAL * config.RISK_PER_TRADE_PCT / 100
     lots_hint = config.LOT_SIZES.get(ticker, config.DEFAULT_LOT_SIZE)
@@ -453,6 +481,7 @@ def _format_paired_block(group: dict, spot: float, vix: float,
         f"  <b>BUY VOLATILITY - {display_pair_type}</b>  [{label}]\n"
         f"  View    : Big move expected; direction does not matter\n"
         f"  {setup_line}\n"
+        f"  Plan    : One non-directional trade; enter BOTH legs together\n"
         f"  {strike_line}\n"
         f"  Expiry  : {expiry_str}\n"
         f"  Spot    : {spot:,.0f}  |  VIX: {vix:.1f}%\n"
@@ -487,21 +516,28 @@ def _format_ticker_block(ticker: str, ticker_data: dict) -> str:
 
     # Header
     conflict_badge = "  ⚡ CONFLICT" if has_conflict else ""
-    header = f"<b>📊 {name}{conflict_badge}</b>"
+    header = f"<b>📊 {_html_text(name)}{conflict_badge}</b>"
 
     # Notes
     notes = []
     if paired_groups:
-        pair_labels = ", ".join(g["label"] for g in paired_groups)
-        notes.append(f"  Volatility trade: CE + PE is intentional, not a conflict ({pair_labels})")
+        pair_labels = ", ".join(_html_text(g["label"]) for g in paired_groups)
+        notes.append(f"  📐 Vol trade: CE + PE is one paired setup ({pair_labels})")
     if len(ce_strategies) >= 2:
-        notes.append(f"  ✅ {len(ce_strategies)} strategies agree: BUY CE ({', '.join(ce_strategies)})")
+        notes.append(
+            f"  ✅ {len(ce_strategies)} strategies agree: "
+            f"BUY CE ({_html_text(', '.join(ce_strategies))})"
+        )
     if len(pe_strategies) >= 2:
-        notes.append(f"  ✅ {len(pe_strategies)} strategies agree: BUY PE ({', '.join(pe_strategies)})")
+        notes.append(
+            f"  ✅ {len(pe_strategies)} strategies agree: "
+            f"BUY PE ({_html_text(', '.join(pe_strategies))})"
+        )
     if has_conflict:
         notes.append(
-            f"  ⚠️ Mixed signals — CE from: {', '.join(ce_strategies) or '—'} "
-            f"| PE from: {', '.join(pe_strategies) or '—'}"
+            f"  ⚠️ Mixed signals — "
+            f"CE from: {_html_text(', '.join(ce_strategies) or '—')} "
+            f"| PE from: {_html_text(', '.join(pe_strategies) or '—')}"
         )
     note_block = "\n".join(notes)
 
@@ -646,7 +682,7 @@ def generate_signal_messages() -> list[str]:
     total_signals = sum(_count_signals(v) for v in collected.values())
     header = (
         f"<b>🔔 NSE Options Signals</b>\n"
-        f"Date       : {today.strftime('%d %b %Y')} (execute tomorrow at open)\n"
+        f"Date       : {today.strftime('%d %b %Y')} ({_execution_note(today)})\n"
         f"Strategies : {n_strategies} running\n"
         f"Signals    : {total_signals} across {len(collected)} underlying(s)"
     )
@@ -743,7 +779,7 @@ def generate_signal_message(strategy=None) -> str:
 
         header = (
             f"<b>NSE Options Signals</b>\n"
-            f"Date    : {today.strftime('%d %b %Y')} (execute tomorrow)\n"
+            f"Date    : {today.strftime('%d %b %Y')} ({_execution_note(today)})\n"
             f"Strategy: {strategy_label}"
         )
         if is_inverse:

@@ -514,6 +514,7 @@ GitHub Actions sends signals every weekday at 4:15 PM IST (45 min after NSE clos
 
 **What the bot sends:**
 - BUY CE / BUY PE per underlying
+- Long straddle/strangle volatility trades as one paired setup where CE + PE are both required
 - Strike, expiry, spot, India VIX, trigger label
 - Stop-loss %, target %, risk amount in ₹, lot size
 - Conflict detection: if MA and RSI disagree on the same underlying, both signals are shown
@@ -534,6 +535,40 @@ set TELEGRAM_BOT_TOKEN=your_token
 set TELEGRAM_CHAT_ID=your_chat_id
 python src/telegram_notify.py
 ```
+
+---
+
+## Weekly Optimization Review by Email
+
+GitHub Actions can replay the completed trading week every Saturday at 9:00 AM IST and email
+a strategy scoreboard plus trade evidence. This is the feedback loop for tuning thresholds:
+daily Telegram alerts propose trades; the weekly review shows which strategies actually paid,
+which exits fired, and where IV/target/stop parameters need work.
+
+```bash
+# Generate files and send email when SMTP env vars are configured
+python main.py weekly-report
+
+# Generate local files only
+python main.py weekly-report --no-email
+
+# Review the week containing a specific date
+python main.py weekly-report --as-of 2026-09-05
+```
+
+Outputs are saved under `reports/weekly/`:
+- `weekly_review_<week>.html` — readable email/report
+- `weekly_trades_<week>.csv` — closed-trade evidence for analysis
+- `weekly_metrics_<week>.csv` — strategy-level scoreboard
+
+Add these GitHub repository secrets to enable email:
+- `SMTP_HOST`
+- `SMTP_PORT` such as `587`
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD`
+- `WEEKLY_EMAIL_FROM`
+- `WEEKLY_EMAIL_TO` as one or more comma-separated recipients
+- `SMTP_TLS` optional, defaults to true
 
 ---
 

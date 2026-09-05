@@ -1,0 +1,67 @@
+name: Weekly Algo Review
+
+on:
+  # Run every Saturday at 9:00 AM IST = Saturday 03:30 UTC.
+  schedule:
+    - cron: "30 3 * * 6"
+
+  workflow_dispatch:
+
+jobs:
+  weekly-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore market data cache
+        id: data-cache
+        uses: actions/cache@v4
+        with:
+          path: data/raw
+          key: market-data-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            market-data-${{ runner.os }}-
+
+      - name: Generate and email weekly review
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_TLS: ${{ secrets.SMTP_TLS }}
+          WEEKLY_EMAIL_FROM: ${{ secrets.WEEKLY_EMAIL_FROM }}
+          WEEKLY_EMAIL_TO: ${{ secrets.WEEKLY_EMAIL_TO }}
+        run: python main.py weekly-report
+
+      - name: Upload weekly reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-algo-review
+          path: reports/weekly/
+
+      - name: Save market data cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/raw
+          key: market-data-${{ runner.os }}-${{ github.run_id }}

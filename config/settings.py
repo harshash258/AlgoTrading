@@ -39,12 +39,12 @@ DAYS_BEFORE_EXPIRY_EXIT = 1
 # LOT SIZES (NSE current lot sizes)
 # ─────────────────────────────────────────────
 LOT_SIZES = {
-    "^NSEI":       25,    # Nifty 50
-    "^NSEBANK":    15,    # Bank Nifty
-    "NIFTY_FIN_SERVICE.NS": 40,    # Fin Nifty
-    "NIFTY":       25,
-    "BANKNIFTY":   15,
-    "FINNIFTY":    40,
+    "^NSEI":       65,    # Nifty 50
+    "^NSEBANK":    30,    # Bank Nifty
+    "NIFTY_FIN_SERVICE.NS": 60,    # Fin Nifty
+    "NIFTY":       65,
+    "BANKNIFTY":   30,
+    "FINNIFTY":    60,
     "MIDCPNIFTY":  75,
     # Add individual stock lot sizes as needed
     "RELIANCE.NS": 250,
@@ -100,3 +100,10 @@ REPORTS_DIR           = "reports"
 SIGNALS_DIR           = "signals"
 TEMPLATES_DIR         = "templates"
 REPORT_ROWS_PER_PAGE  = 50
+
+# ─────────────────────────────────────────────
+# WEEKLY REVIEW EMAIL
+# ─────────────────────────────────────────────
+WEEKLY_REVIEW_DIR     = "reports/weekly"
+WEEKLY_REVIEW_RECIPIENTS = []  # fallback when WEEKLY_EMAIL_TO is not set
+SMTP_TLS              = True

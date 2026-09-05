@@ -50,6 +50,9 @@ Usage
 
   # Quick optimization with reduced grid (~144 combos)
   python main.py optimize --quick
+
+  # Replay the completed week and email the optimization review
+  python main.py weekly-report
 """
 
 import argparse
@@ -332,6 +335,27 @@ def cmd_screen_stocks(args):
         print(f"📊 CSV saved: {csv_path}\n")
 
 
+def cmd_weekly_report(args):
+    """Replay this week's trades and optionally email the review."""
+    from algo_trading.reporting.weekly_review import build_weekly_review, parse_date
+
+    as_of = parse_date(args.as_of)
+    result = build_weekly_review(
+        as_of=as_of,
+        tickers=args.ticker,
+        send_email=not args.no_email,
+    )
+
+    print("\nWeekly review generated")
+    print(f"  Window       : {result.week_start} to {result.week_end}")
+    print(f"  Closed trades: {result.total_trades}")
+    print(f"  Net P&L      : INR {result.net_pnl:,.0f}")
+    print(f"  HTML report  : {result.html_path}")
+    print(f"  Trade CSV    : {result.csv_path}")
+    print(f"  Metrics CSV  : {result.summary_path}")
+    print(f"  Email        : {result.email_status}\n")
+
+
 # ── CLI ──────────────────────────────────────────────────────────
 
 def main():
@@ -412,6 +436,24 @@ def main():
         help="Number of parallel workers for fetching stock data (default: 4, max recommended: 8)",
     )
 
+    # weekly-report
+    weekly_parser = sub.add_parser(
+        "weekly-report",
+        help="Replay the completed week and email a strategy optimization review",
+    )
+    weekly_parser.add_argument(
+        "--as-of",
+        help="Review week containing this date, YYYY-MM-DD (default: today)",
+    )
+    weekly_parser.add_argument(
+        "--ticker", action="append",
+        help="Ticker(s) to include (default: all configured underlyings)",
+    )
+    weekly_parser.add_argument(
+        "--no-email", action="store_true",
+        help="Generate report files without sending email",
+    )
+
     args = parser.parse_args()
     if args.command == "backtest":
         cmd_backtest(args)
@@ -425,6 +467,8 @@ def main():
         cmd_optimize(args)
     elif args.command == "screen":
         cmd_screen_stocks(args)
+    elif args.command == "weekly-report":
+        cmd_weekly_report(args)
 
 
 if __name__ == "__main__":
