@@ -44,6 +44,9 @@ class Signal:
     signal_type : str = "entry" # "entry" | "exit"
     exit_reason : str = ""
     meta        : dict = field(default_factory=dict)
+    group_id    : str = ""
+    structure_type: str = "single"
+    execution_timing: str = ""
 
     def __post_init__(self):
         if self.direction not in ("long", "short"):

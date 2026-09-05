@@ -165,11 +165,15 @@ def trades_to_dataframe(trades: list[Trade]) -> pd.DataFrame:
     for t in trades:
         rows.append({
             "id"           : t.id,
+            "group_id"     : getattr(t, "group_id", ""),
+            "structure_type": getattr(t, "structure_type", "single"),
+            "leg_label"    : getattr(t, "leg_label", ""),
             "underlying"   : t.underlying,
             "option_type"  : t.option_type,
             "direction"    : t.direction,
             "strike"       : t.strike,
             "expiry"       : t.expiry.isoformat() if t.expiry else "",
+            "signal_date"  : t.signal_date.isoformat() if getattr(t, "signal_date", None) else "",
             "entry_date"   : t.entry_date.isoformat() if t.entry_date else "",
             "exit_date"    : t.exit_date.isoformat() if t.exit_date else "",
             "entry_premium": round(t.entry_premium, 2),
@@ -187,6 +191,9 @@ def trades_to_dataframe(trades: list[Trade]) -> pd.DataFrame:
             "net_pnl"      : round(t.net_pnl, 2),
             "pnl_pct"      : round(t.pnl_pct, 2),
             "held_days"    : t.held_days,
+            "pricing_source": getattr(t, "pricing_source", ""),
+            "vix_source"   : getattr(t, "vix_source", ""),
+            "vix_warning"  : t.entry_meta.get("vix_warning", "") if getattr(t, "entry_meta", None) else "",
         })
     return pd.DataFrame(rows)
 

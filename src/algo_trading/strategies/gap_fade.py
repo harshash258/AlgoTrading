@@ -190,7 +190,9 @@ class GapFadeStrategy(BaseStrategy):
                 date=current_date, underlying=underlying,
                 direction="long", option_type="PE",
                 strike=0.0, expiry=expiry, signal_type="entry",
-                meta={**meta_base, "trigger": f"Gap up {gap_pct:.2f}% — fade"},
+                structure_type="gap_fade",
+                execution_timing="next_open",
+                meta={**meta_base, "trigger": f"Gap up {gap_pct:.2f}% — fade", "execution_note": "EOD-confirmed; execute next trading day at open"},
             ))
             self._prev_signal[underlying] = "long_pe"
             self._entry_date[underlying]  = current_date
@@ -208,7 +210,9 @@ class GapFadeStrategy(BaseStrategy):
                 date=current_date, underlying=underlying,
                 direction="long", option_type="CE",
                 strike=0.0, expiry=expiry, signal_type="entry",
-                meta={**meta_base, "trigger": f"Gap down {gap_pct:.2f}% — fade"},
+                structure_type="gap_fade",
+                execution_timing="next_open",
+                meta={**meta_base, "trigger": f"Gap down {gap_pct:.2f}% — fade", "execution_note": "EOD-confirmed; execute next trading day at open"},
             ))
             self._prev_signal[underlying] = "long_ce"
             self._entry_date[underlying]  = current_date
@@ -226,6 +230,7 @@ class GapFadeStrategy(BaseStrategy):
             "vix_range"        : f"{self.vix_min}–{self.vix_max}",
             "time_stop_days"   : self.time_stop_days,
             "weekly_expiry"    : self.weekly,
+            "execution"        : "EOD-confirmed; next trading day open",
             "stop_loss"        : f"{config.BUY_STOP_LOSS_PCT}% of premium",
             "target"           : f"{config.BUY_TARGET_PCT}% of premium",
         }

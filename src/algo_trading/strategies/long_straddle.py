@@ -131,11 +131,14 @@ class LongStraddleStrategy(BaseStrategy):
         if in_trade and self.time_stop_days > 0:
             entry_dt = self._entry_date.get(underlying)
             if entry_dt and (current_date - entry_dt).days >= self.time_stop_days:
+                group_id = f"{underlying}:{self.name}"
                 for opt_type in ("CE", "PE"):
                     signals.append(Signal(
                         date=current_date, underlying=underlying,
                         direction="long", option_type=opt_type,
                         signal_type="exit", exit_reason="time_stop",
+                        group_id=group_id,
+                        structure_type="straddle" if self.otm_delta == 0 else "strangle",
                         meta={"days_held": (current_date - entry_dt).days},
                     ))
                 self._in_trade[underlying]  = False
@@ -145,6 +148,7 @@ class LongStraddleStrategy(BaseStrategy):
         # ── Entry: IV percentile is LOW → buy vol cheap ───────────
         if not in_trade and iv_percentile <= self.iv_entry_pct:
             variant = "straddle" if self.otm_delta == 0 else "strangle"
+            group_id = f"{underlying}:{self.name}:{current_date.isoformat()}"
             for opt_type, strike in (("CE", strike_ce), ("PE", strike_pe)):
                 signals.append(Signal(
                     date=current_date,
@@ -154,6 +158,8 @@ class LongStraddleStrategy(BaseStrategy):
                     strike=strike,
                     expiry=expiry,
                     signal_type="entry",
+                    group_id=group_id,
+                    structure_type=variant,
                     meta={
                         "iv_percentile" : round(float(iv_percentile), 1),
                         "current_vix"   : round(current_vix, 2),
@@ -172,6 +178,7 @@ class LongStraddleStrategy(BaseStrategy):
 
         # ── Exit: IV percentile has risen → take vol expansion profit
         elif in_trade and iv_percentile >= self.iv_exit_pct:
+            group_id = f"{underlying}:{self.name}"
             for opt_type in ("CE", "PE"):
                 signals.append(Signal(
                     date=current_date,
@@ -180,6 +187,8 @@ class LongStraddleStrategy(BaseStrategy):
                     option_type=opt_type,
                     signal_type="exit",
                     exit_reason="signal",
+                    group_id=group_id,
+                    structure_type="straddle" if self.otm_delta == 0 else "strangle",
                     meta={
                         "iv_percentile" : round(float(iv_percentile), 1),
                         "reason"        : f"IV expanded above {self.iv_exit_pct}%",
