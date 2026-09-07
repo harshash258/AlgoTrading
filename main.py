@@ -235,6 +235,89 @@ def cmd_signals(args):
     print(re.sub(r"<[^>]+>", "", msg))
 
 
+def cmd_daily_report(args):
+    import json
+    import pandas as pd
+    from pathlib import Path
+    from datetime import timedelta
+    from algo_trading.data.signal_data import prepare_signal_data, india_today
+    from algo_trading.data.providers import ReplayProvider, UpstoxProvider, capture_live
+    from algo_trading.core.contracts import ContractMaster
+    from algo_trading.reporting.daily_signals import (collect_watchlist, build_daily_report,
+        save_daily_report, QualityPolicy)
+    asof = date.fromisoformat(args.as_of) if args.as_of else india_today()
+    entry = args.entry_at
+    if not entry:
+        day = asof + timedelta(days=1)
+        while day.weekday() >= 5:
+            day += timedelta(days=1)
+        entry = str(day) + "T09:32:00+05:30"
+    policy = QualityPolicy(**json.loads(Path(args.policy).read_text())) if args.policy else QualityPolicy()
+    reasons = []
+    if args.watchlist:
+        saved = json.loads(Path(args.watchlist).read_text(encoding="utf-8"))
+        if saved.get("asof") != str(asof):
+            raise ValueError("Watchlist EOD date does not match --as-of")
+        collected = saved["collected"]
+        for item in collected.values():
+            for leg in item["sigs"]:
+                leg["expiry"] = date.fromisoformat(leg["expiry"])
+    else:
+        preparation = prepare_signal_data(asof, download=not args.offline,
+            output_dir=os.environ.get("SIGNAL_BHAVCOPY_FOLDER", "data/signal-bhavcopy"))
+        reasons.extend(f"{k}: {v['status']}" for k, v in preparation["underlyings"].items() if v["status"] != "ready")
+        try:
+            if args.offline:
+                data = {}
+                reasons.append("Offline run requires --watchlist for saved validated EOD candidates")
+            else:
+                data = get_combined_dataset(start=asof-timedelta(days=400), end=asof, force_refresh=False)
+                data = {k: v.loc[v.index.date <= asof] for k, v in data.items() if k in config.UNDERLYINGS}
+            collected, blocked = collect_watchlist(data, asof, entry, policy)
+            reasons.extend(blocked)
+        except Exception as exc:
+            collected = {}
+            reasons.append("EOD preparation failed: " + type(exc).__name__)
+    provider = None
+    if args.provider == "upstox":
+        if not args.instruments:
+            raise ValueError("--instruments is required for Upstox")
+        if args.entry_at:
+            raise ValueError("Live Upstox uses the timestamp after acquisition; omit --entry-at (use replay for historical timestamps)")
+        provider = capture_live(UpstoxProvider(os.environ.get("UPSTOX_ACCESS_TOKEN"),
+            json.loads(Path(args.instruments).read_text())), collected)
+        entry = provider.asof
+    elif args.quotes:
+        provider = ReplayProvider(dict(item.split("=", 1) for item in args.bars or []), args.quotes)
+    master = ContractMaster.from_csv(args.contract_master) if args.contract_master else ContractMaster()
+    history = pd.read_csv(args.iv_history) if args.iv_history else None
+    portfolio = json.loads(Path(args.portfolio).read_text()) if args.portfolio else None
+    report = build_daily_report(collected, asof, entry, master, provider, history, portfolio, policy, reasons)
+    output = Path(args.output or f"reports/daily-signals/{asof}")
+    path = save_daily_report(report, output)
+    # Save exact validated EOD inputs for confirmation without refetching a past session.
+    (output / "watchlist.json").write_text(json.dumps({"asof": str(asof), "collected": collected}, default=str, indent=2), encoding="utf-8")
+    print(f"Daily report: {path.resolve()}")
+    print(f"Confirmed: {len(report['confirmed_entries'])}; awaiting: {len(report['awaiting_triggers'])}")
+
+
+def cmd_evaluate_signals(args):
+    import json
+    from pathlib import Path
+    from algo_trading.data.intraday import load_intraday_csv
+    from algo_trading.core.contracts import ContractMaster
+    from algo_trading.reporting.signal_evaluation import chronological_evaluation
+    reports = [json.loads(p.read_text(encoding="utf-8")) for p in Path(args.report_journal).glob("**/report.json")] if args.report_journal else []
+    result = chronological_evaluation(load_intraday_csv(args.bars), load_intraday_csv(args.quotes, quotes=True),
+        args.ticker, ContractMaster.from_csv(args.contract_master), args.train_sessions,
+        args.test_sessions, args.holdout_sessions, reports=reports)
+    output = Path(args.output)
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "evaluation.json").write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
+    print(f"Chronological evaluation: {(output / 'evaluation.json').resolve()}")
+    print(json.dumps({"validation": result["validation"], "holdout": result["holdout"]["metrics"], "coverage": result["coverage"]}, indent=2))
+
+
 def cmd_fetch(args):
     """Download / refresh market data cache."""
     tickers = args.ticker or config.UNDERLYINGS
@@ -404,6 +487,32 @@ def main():
     sig_parser.add_argument("--strategy", default="combined")
     sig_parser.add_argument("--ticker", action="append")
 
+    daily = sub.add_parser("daily-report", help="Write EOD watchlist or intraday confirmation; never sends messages")
+    daily.add_argument("--as-of")
+    daily.add_argument("--entry-at", help="Intended entry ISO timestamp with timezone; default next weekday is provisional")
+    daily.add_argument("--watchlist", help="Saved validated EOD watchlist.json")
+    daily.add_argument("--offline", action="store_true")
+    daily.add_argument("--contract-master")
+    daily.add_argument("--iv-history")
+    daily.add_argument("--portfolio")
+    daily.add_argument("--policy")
+    daily.add_argument("--provider", choices=["replay", "upstox"], default="replay")
+    daily.add_argument("--instruments")
+    daily.add_argument("--bars", action="append", help="TICKER=completed_one_minute_bars.csv")
+    daily.add_argument("--quotes")
+    daily.add_argument("--output")
+
+    evaluation = sub.add_parser("evaluate-signals", help="Chronological ORB/VWAP selection with final untouched holdout")
+    evaluation.add_argument("--bars", required=True)
+    evaluation.add_argument("--quotes", required=True)
+    evaluation.add_argument("--ticker", required=True)
+    evaluation.add_argument("--contract-master", required=True)
+    evaluation.add_argument("--train-sessions", type=int, default=60)
+    evaluation.add_argument("--test-sessions", type=int, default=20)
+    evaluation.add_argument("--holdout-sessions", type=int, default=20)
+    evaluation.add_argument("--report-journal")
+    evaluation.add_argument("--output", default="reports/signal-evaluation")
+
     # fetch
     fetch_parser = sub.add_parser("fetch", help="Download/refresh market data cache")
     fetch_parser.add_argument("--ticker", action="append")
@@ -482,6 +591,10 @@ def main():
         cmd_intraday(args)
     elif args.command == "signals":
         cmd_signals(args)
+    elif args.command == "evaluate-signals":
+        cmd_evaluate_signals(args)
+    elif args.command == "daily-report":
+        cmd_daily_report(args)
     elif args.command == "fetch":
         cmd_fetch(args)
     elif args.command == "bhavcopy":

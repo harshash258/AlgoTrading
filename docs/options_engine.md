@@ -195,3 +195,177 @@ Cache snapshots use one key per IST date rather than one per run, and the new
 Multiple date snapshots can still occupy storage; each snapshot has a bounded
 14-day payload. Existing remote caches are not deleted by this local change.
 Daily signal-data diagnostic artifacts expire after 7 days.
+
+## Two-stage daily signal quality
+
+`daily-report` is the daily workflow's report command. It writes Markdown, JSON,
+validated `watchlist.json`, and per-contract `iv_observations.csv`. It does not call
+Telegram, email, or order endpoints. The workflow uploads the report for seven days;
+merging/deploying is still required to change scheduled behavior.
+
+```powershell
+.venv-options\Scripts\python.exe main.py daily-report --as-of 2026-09-07
+.venv-options\Scripts\python.exe main.py daily-report --as-of 2026-09-07 --entry-at 2026-09-08T09:32:00+05:30 --watchlist reports/daily-signals/2026-09-07/watchlist.json --bars '^NSEI=data/nifty_minutes.csv' --quotes data/option_quotes.csv --contract-master data/contracts.csv --portfolio data/portfolio.json --iv-history data/iv_history.csv --output reports/confirmation/2026-09-08
+```
+
+The next weekday default is a provisional planning date, **not an exchange holiday
+calendar**. Supply the actual intended session with `--entry-at`; confirmation also
+requires actual session candles. The saved watchlist date must match `--as-of`.
+`--offline` avoids downloading EOD data. With no saved watchlist it produces a
+missing-data report rather than inventing setups.
+
+EOD directional strategies provide context. Daily ORB/VWAP proxies are excluded from
+this path. ORB plans require a complete one-minute opening range and a subsequent
+completed breakout candle; session VWAP plans require complete one-minute bars with
+actual traded volume. An index with zero volume cannot confirm VWAP. Do not attach
+futures volume to index prices; futures-based VWAP needs an explicit instrument and
+basis model, which is not implemented here. Directional EOD ideas require a completed
+intraday close beyond the EOD close in their direction. Volatility structures require
+contract IV thresholds on every leg and fresh intraday spot. These are explicit
+heuristic confirmation rules, not established sources of predictive accuracy.
+
+The report separates confirmed entries, primary setups awaiting triggers/data, and
+alternatives/ineligible setups. It never requires a daily trade. Missing option
+specifications leave the watchlist visible but quantities unavailable. Eligible
+setups rank before blocked ones, then observed triggers, smaller spreads, and stable
+strategy-name tie breaks. Duplicate contract structures merge supporting strategy
+labels when they share a trigger family; ORB and VWAP remain separate alternatives.
+One primary is allocated per underlying, with shared portfolio reservations across
+underlyings. Ranking is a transparent heuristic, not a probability or accuracy score.
+
+Contract expiry comes from the underlying's current listed chain and is filtered at
+intended entry. Expiry-day trading defaults off. A policy JSON supplied with `--policy`
+can override `allow_expiry_day`, `expiry_day_cutoff` (IST, default `12:00`),
+`min_hours_to_expiry` (2), `max_quote_age_seconds` (30), `max_bar_age_seconds` (90),
+`max_spread_pct` (5), `min_iv_sessions` (20), `low_iv_percentile` (30), and
+`high_iv_percentile` (70). Actual expiry-day performance is broken out separately from
+other tenors in chronological evaluation.
+
+IV is inverted from the selected contract's EOD premium or live bid/ask midpoint,
+using this contract's remaining time. Historical comparisons use the same underlying,
+option type, tenor bucket (expiry day, 1–7, 8–30, 31+ days), and strike/spot ratio within
+0.02. One median per prior IST session avoids counting ticks as independent history;
+at most 252 prior sessions are used. Today/future observations cannot enter the
+percentile baseline. IV history CSV columns are:
+
+```csv
+timestamp,underlying,option_type,dte,moneyness,iv
+```
+
+IV is a decimal (0.15 = 15%); timestamps include offsets; `dte` is fractional days and
+`moneyness` is strike/spot at observation. Archive the report's `iv_observations.csv`
+into a sourced persistent history outside the short-lived bhavcopy cache, then pass
+that history with `--iv-history`. No historical IV observations are fabricated or
+reconstructed from future data. Until 20 comparable prior sessions exist, volatility
+setups are blocked with an explicit reason. India VIX remains only a regime feature.
+The Black-Scholes inversion remains a model with rate/dividend/forward-basis limitations;
+it is not a calibrated arbitrage-free volatility surface.
+
+Portfolio JSON example (replace the timestamp and values with an actual snapshot):
+
+```json
+{
+  "asof": "2026-09-08T09:31:45+05:30",
+  "verified": true,
+  "equity": 500000,
+  "available_cash": 300000,
+  "peak_equity": 500000,
+  "day_start_equity": 500000,
+  "positions": [
+    {
+      "underlying": "^NSEI",
+      "reserved_capital": 200000,
+      "max_loss": 10000,
+      "legs": [{"expiry": "2026-09-15", "strike": 23800, "option_type": "CE", "units": 65}]
+    }
+  ]
+}
+```
+
+Existing leg units are signed. Portfolio equity is marked equity, and reserved
+capital/max loss must include all existing positions, including broker-managed ones.
+A snapshot older than 60 seconds, in the future, or unverified cannot confirm entries.
+Absent portfolio information gives estimates only. Duplicate existing contract units
+are aggregated before sizing and block additional allocation; no offsetting margin
+benefit is assumed. Limits use existing RiskManager capital, whole-trade risk,
+portfolio risk, margin utilization, position count, daily-loss and drawdown checks.
+Paired structures receive equal lots/units and one payoff-based loss budget. Both
+entry and estimated exit fees are reserved. Live buys use ask, shorts bid; spread,
+quote age and both entry/exit displayed depth limit quantities. Uncovered shorts are
+disabled in this report. Displayed depth does not guarantee a multi-leg fill. EOD
+sizing uses archived lot sizes, not a guess from current configured defaults.
+
+## Verified provider capabilities
+
+The repository previously used yfinance for daily spot/VIX, NSE bhavcopy for EOD
+options, and local CSV intraday replay. Bhavcopy does **not** supply synchronized
+intraday quotes, spread/depth, or live IV. yfinance is an unofficial wrapper and is
+not the execution quote provider.
+
+Upstox was chosen for the user's free-data preference. Its official
+[API overview](https://upstox.com/developer/api-documentation/open-api/) advertises
+free API access. Account authentication and account-specific access still need to
+be configured; no subscription or paid data was purchased. The read-only
+`UpstoxProvider` implements documented
+[one-minute intraday candles](https://upstox.com/developer/api-documentation/v3/get-intra-day-candle-data/)
+and [full quotes with depth and timestamps](https://upstox.com/developer/api-documentation/get-full-market-quote/).
+It shifts candle-start timestamps to completed interval ends, preserves vendor quote
+timestamps, and never treats HTTP arrival time as quote freshness. API failures leave
+setups unconfirmed. This REST adapter has not been authenticated/live-tested here.
+
+Upstox also documents [expiry-specific option chains with IV/Greeks](https://upstox.com/developer/api-documentation/get-pc-option-chain/),
+but that chain response alone does not establish the quote freshness required here.
+The adapter uses full quotes and calculates midpoint IV locally. It does not claim
+historical depth is supplied by historical candle endpoints. Alternative verified
+Kite capabilities include [instruments/full quotes](https://kite.trade/docs/connect/v3/market-quotes/)
+and [historical candles](https://kite.trade/docs/connect/v3/historical/); no Kite
+adapter or subscription is required by this change.
+
+Set `UPSTOX_ACCESS_TOKEN` securely in the local environment. Do not paste a token into
+chat or save it in reports. Pass `--provider upstox --instruments data/upstox_instruments.json`
+alongside the watchlist, current portfolio and contract master. For live Upstox omit
+`--entry-at`: the decision timestamp is captured after the read-only data batch is
+received. Replay accepts an explicit historical decision timestamp. The instrument mapping
+contains `underlyings` (project ticker to official instrument key) and `contracts`
+(rows of `underlying, instrument_key, expiry, strike, option_type`). Obtain these keys
+and lot sizes from the provider's listed instrument master; do not construct tokens.
+The adapter exposes no order, portfolio-mutation, or message methods. Historical
+confirmation uses `ReplayProvider`, not current REST data relabeled as history.
+
+## Chronological quality evaluation
+
+```powershell
+.venv-options\Scripts\python.exe main.py evaluate-signals --ticker '^NSEI' --bars data/nifty_minutes.csv --quotes data/option_quotes.csv --contract-master data/contracts.csv --train-sessions 60 --test-sessions 20 --holdout-sessions 20 --report-journal reports/daily-signals --output reports/quality-evaluation
+```
+
+This evaluates the existing quote-driven ORB/VWAP execution engine on archived
+observations. Within each expanding training prefix it selects among ORB/VWAP and
+expiry-day enabled/disabled policies by net expectancy, then runs the next unseen
+window. The last holdout sessions are excluded from every development selection;
+final selection uses only preceding data. Training with no trades selects no policy.
+Data/execution failures propagate instead of producing flattering partial statistics.
+
+Outputs include net expectancy in INR per complete trade, trade count, win rate,
+closed-trade drawdown, and breakdowns by strategy, underlying, actual entry expiry
+distance, prior-session market conditions, and expiry-day policy. Fold/holdout metrics
+also contain observed intraday equity drawdown. Each fold starts with fresh capital;
+breakdown drawdowns are realized subgroup P&L, not standalone hedge portfolios.
+Conditions use the previous session's return (up >0.5%, down <-0.5%, otherwise flat),
+never the closing condition of the entry day. Reusing a holdout after tuning consumes it.
+
+Report coverage uses distinct generated-report dates from the separate JSON journal;
+actionable frequency uses distinct confirmed-report dates. The denominator is observed
+bar sessions, so it does not prove coverage of missing market-data sessions; provide a
+complete session archive. With no journal both counts are zero. Evaluation does not
+claim that an executed backtest trade proves a daily report was generated.
+
+The evaluation smoke data and regression tests are explicitly synthetic. Real EOD
+validation establishes data availability only. No synchronized historical quotes or
+comparable IV history are bundled, and no improved accuracy, expectancy or win rate
+is claimed. The existing daily-strategy walk-forward research remains separate from
+this intraday evaluation and its daily ORB/VWAP proxies are not live confirmations.
+
+Storage behavior is unchanged: 14-day `data/signal-bhavcopy/`, one option-cache key per
+IST date, seven-day diagnostic retention, and untouched `data/bhavcopy/` historical
+archive. The new report command explicitly selects the short signal cache even when
+no workflow environment variable is present.

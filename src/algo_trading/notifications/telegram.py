@@ -212,8 +212,8 @@ def _execution_note(today: date) -> str:
     """Human-readable execution date for next market open."""
     next_day = _next_trading_day(today)
     if next_day == today + timedelta(days=1):
-        return f"execute {next_day.strftime('%d %b %Y')} at open"
-    return f"execute next market open: {next_day.strftime('%d %b %Y')}"
+        return f"watch {next_day.strftime('%d %b %Y')}; await intraday confirmation"
+    return f"watch next session: {next_day.strftime('%d %b %Y')}; await intraday confirmation"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -252,9 +252,19 @@ def _send_in_parts(messages: list[str], token: str, chat_id: str) -> bool:
 # Signal collection
 # ─────────────────────────────────────────────────────────────────
 
+def _set_live_expiries(frame, ticker: str, today: date) -> bool:
+    """Use this session's contracts, excluding expiry before next-open entry."""
+    lookup = _get_chain_lookup(ticker)
+    expiries = lookup.listed_expiries(today) if lookup is not None else []
+    frame.attrs["contract_expiries"] = [e for e in expiries if e > today]
+    return bool(frame.attrs["contract_expiries"])
+
+
 def _collect_signals(
     data: dict,
     today: date,
+    quality_mode: bool = False,
+    expiry_filter=None,
 ) -> tuple[dict, list[str]]:
     """
     Run all strategies on today's data.
@@ -285,6 +295,13 @@ def _collect_signals(
     suppressed: list[str] = []
 
     for strategy_label, strategy in strategies:
+        if quality_mode and strategy_label in {"Opening Range Breakout", "VWAP Reversion", "VWAP Breakout"}:
+            continue
+        if quality_mode and strategy_label in _VOLATILITY_LABELS:
+            # Construct candidates independently of the old VIX percentile gate.
+            # The daily service checks selected-contract IV on every leg instead.
+            strategy.iv_window = 1
+            strategy.iv_entry_pct = 101 if strategy_label.startswith("Long") else -1
         for ticker, df in data.items():
             if df.empty or df.index.max().date() != today:
                 reason = f"{TICKER_NAMES.get(ticker, ticker)}: current-session spot candle unavailable"
@@ -303,6 +320,16 @@ def _collect_signals(
                 )
                 continue
 
+            if not _set_live_expiries(df_copy, ticker, today):
+                reason = f"{TICKER_NAMES.get(ticker, ticker)}: no current listed expiries available for next-open entry"
+                if reason not in suppressed:
+                    suppressed.append(reason)
+                continue
+            if expiry_filter is not None:
+                df_copy.attrs["contract_expiries"] = [e for e in df_copy.attrs["contract_expiries"] if expiry_filter(e)]
+                if not df_copy.attrs["contract_expiries"]:
+                    suppressed.append(f"{ticker}: no listed expiry eligible at intended entry")
+                    continue
             try:
                 sigs = strategy.generate_signals(df_copy, vix_series, today)
             except Exception as e:
@@ -485,7 +512,7 @@ def _format_signal_block(sig_info: dict, spot: float, vix: float,
     trigger = meta.get("trigger", meta.get("reason", ""))
     if not trigger:
         if "iv_percentile" in meta:
-            trigger = f"IV percentile {meta['iv_percentile']}%"
+            trigger = f"India VIX regime percentile {meta['iv_percentile']}% (not contract IV)"
         elif "gap_pct" in meta:
             trigger = f"Gap {meta['gap_pct']:+.2f}%"
         elif "fast_ma" in meta:
@@ -504,6 +531,8 @@ def _format_signal_block(sig_info: dict, spot: float, vix: float,
         tgt_line = f"Target  : +{config.BUY_TARGET_PCT:.0f}% of premium"
 
     label = _html_text(label)
+    if "iv_percentile" in meta:
+        trigger = str(trigger).replace("IV percentile", "India VIX regime percentile (not contract IV)")
     trigger = _html_text(trigger)
 
     # Iron condor leg tag
@@ -604,7 +633,7 @@ def _format_paired_block(group: dict, spot: float, vix: float,
     display_pair_type = _html_text(pair_type.upper())
 
     expiry_str = expiry.strftime("%d %b '%y") if expiry else "—"
-    trigger    = _html_text(meta.get("trigger", "vol cheap"))
+    trigger    = _html_text(str(meta.get("trigger", "VIX regime context; contract IV unverified")).replace("IV percentile", "India VIX regime percentile (not contract IV)"))
 
     sl_line   = f"SL      : -{config.BUY_STOP_LOSS_PCT:.0f}% of premium (each leg)"
     tgt_line  = f"Target  : +{config.BUY_TARGET_PCT:.0f}% of premium (each leg)"
@@ -855,8 +884,8 @@ def generate_signal_messages() -> list[str]:
     # ── Build footer ──────────────────────────────────────────────
     footer = (
         f"\n\n{'─' * 34}\n"
-        f"Execute manually on Groww at market open.\n"
-        f"Set GTT stop-loss immediately after entry.\n"
+        f"EOD watchlist only. Await actual intraday candles and fresh quotes.\n"
+        f"Sizing is an EOD estimate; no entry is confirmed.\n"
         f"Validation uses same-session EOD premium/OI/volume proxies, not live bid/ask quotes."
     )
 
@@ -926,6 +955,8 @@ def generate_signal_message(strategy=None) -> str:
             if df.empty or df.index.max().date() != today:
                 continue
             df.attrs["ticker"] = ticker
+            if not _set_live_expiries(df, ticker, today):
+                continue
             vix_series = df.get("VIX", None)
             if vix_series is None:
                 continue
@@ -979,7 +1010,7 @@ def generate_signal_message(strategy=None) -> str:
         body   = "\n\n" + ("\n\n" + "═" * 34 + "\n\n").join(blocks)
         footer = (
             f"\n{'─' * 34}\n"
-            f"Execute manually on Groww at market open.\n"
+            f"EOD watchlist only. Await actual intraday candles and fresh quotes.\n"
             f"Set GTT stop-loss immediately after entry."
         )
         return header + body + footer

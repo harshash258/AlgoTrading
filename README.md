@@ -3,11 +3,14 @@
 Python-based backtesting, signal generation, strategy exploration, and parameter optimization
 for NSE index options (India). Supports directional, volatility, mean-reversion, and
 delta-neutral strategies. Generates interactive HTML reports with full trade logs and charts.
-Daily signals delivered automatically via Telegram using GitHub Actions.
+The daily GitHub Actions workflow generates an EOD watchlist report. Intraday entries
+require actual candles, fresh option quotes, and portfolio validation; no trade is forced.
 
 **Options engine update:** exact-contract pricing, shared spread risk, mark-to-market equity,
 nested validation, four vertical-spread strategies and timestamped intraday replay are documented
-in [Options engine guide](docs/options_engine.md). Existing sample results predate these fixes
+in [Options engine guide](docs/options_engine.md). The daily report adds two-stage confirmation,
+contract-IV history checks, expiry-aware eligibility, and portfolio-aware sizing.
+Existing sample results predate these fixes
 and should be regenerated. Research fallback prices and historical specification proxies are labeled.
 
 ---
@@ -17,18 +20,22 @@ and should be regenerated. Research fallback prices and historical specification
 ### 1. Install dependencies
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate
+python -m venv .venv-options
+.venv-options\Scripts\activate
 pip install -r requirements.txt
 pip install -e .
 ```
 
-To run unit and regression tests:
-```bash
-pytest tests/
+To run unit and regression tests with the options environment:
+
+```powershell
+.venv-options\Scripts\python.exe -m pytest tests -q -p no:cacheprovider --basetemp reports/test-readme-example
 ```
 
-If `python` is not found or `.venv\Scripts\python.exe` points to an inaccessible interpreter,
+Choose a fresh `reports/` subdirectory for each run. The signal-quality implementation
+passed 129 tests; these regression checks do not establish trading accuracy.
+
+If `python` is not found or `.venv-options\Scripts\python.exe` points to an inaccessible interpreter,
 delete and recreate the virtual environment with the same install commands above.
 
 ### 2. Run your first backtest
@@ -41,11 +48,16 @@ This downloads Nifty 50 + India VIX data (cached after first run), runs the MA c
 combined strategy, simulates options trades, prints a metrics summary, and saves an HTML report
 to `reports/`. Open it in any browser.
 
-### 3. Generate today's signals
+### 3. Generate today's daily options report
 
-```bash
-python main.py signals --strategy combined --ticker ^NSEI
+```powershell
+.venv-options\Scripts\python.exe main.py daily-report
 ```
+
+Read `reports/daily-signals/YYYY-MM-DD/report.md`. The report separates confirmed
+entries, primary setups awaiting triggers/data, alternatives, and no-trade reasons.
+EOD-only generation never confirms an entry. See [Daily options reports](#daily-options-reports)
+for replay, live-provider setup and evaluation.
 
 ### 4. Find the best strategy combination
 
@@ -97,16 +109,16 @@ strategy explorer.
 
 | Key           | Strategy                          | Signal source                                 |
 |---------------|-----------------------------------|-----------------------------------------------|
-| `mean_rev`    | Short Strangle on High IV         | IV percentile > threshold → sell CE + PE      |
+| `mean_rev`    | Short Strangle on High IV         | Legacy VIX regime percentile → CE + PE candidate      |
 | `bb`          | Bollinger Band Reversion          | Price touches band edge, reverts to mean      |
-| `iron_condor` | Iron Condor (delta-neutral)       | High IV + choppy (ADX < threshold) → 4-leg   |
+| `iron_condor` | Iron Condor (delta-neutral)       | Legacy VIX regime + choppy ADX → 4-leg candidate   |
 
 ### Long Volatility (buy vol cheap, profit from expansion)
 
 | Key           | Strategy                          | Signal source                                 |
 |---------------|-----------------------------------|-----------------------------------------------|
-| `straddle`    | Long ATM Straddle                 | IV percentile < threshold → buy CE + PE ATM   |
-| `strangle`    | Long OTM Strangle                 | IV percentile < threshold → buy OTM CE + PE   |
+| `straddle`    | Long ATM Straddle                 | Legacy low VIX percentile → ATM CE + PE candidate   |
+| `strangle`    | Long OTM Strangle                 | Legacy low VIX percentile → OTM CE + PE candidate   |
 
 ### Intraday-proxy / Price Action
 
@@ -123,7 +135,11 @@ strategy explorer.
 | `combined`        | Runs MA crossover + RSI simultaneously, merges signals  |
 | `inv_<any>`       | Inverts any strategy — flips CE↔PE on every signal      |
 
-**Telegram bot uses:** `combined` (MA Crossover 25/75 + RSI 14, thresholds 25/65).
+**Daily report:** evaluates the existing EOD strategy registry and adds conditional ORB/session
+VWAP plans. Daily ORB/VWAP proxies are excluded from this report's entry path. The legacy
+`signals` command remains available for EOD research; it is not intraday confirmation.
+Legacy volatility strategy classes use India VIX regime percentiles. The new daily report
+independently gates volatility setups on selected-contract IV history.
 
 ---
 
@@ -468,40 +484,110 @@ leg-level details for auditability.
 
 ---
 
-## Daily Signals via Telegram
+## Daily Options Reports
 
-GitHub Actions sends signals every weekday at 7:30 PM IST (45 min after NSE close).
+The workflow in this branch runs `daily-report` on weekdays at **19:30 IST** and uploads
+report artifacts instead of sending Telegram messages. Scheduled behavior changes only
+after deployment to the default branch. Local report generation sends no messages or orders.
 
-**What the bot sends:**
-- BUY CE / BUY PE per underlying
-- Long straddle/strangle volatility trades as one paired setup where CE + PE are both required
-- Strike, expiry, spot, India VIX, trigger label
-- Stop-loss %, target %, risk amount in ₹, lot size
-- Contract validation before alerting: expiry exists, strike is listed or near enough,
-  premium is non-zero, and OI/volume meet per-underlying thresholds
-- Conflict detection: if MA and RSI disagree on the same underlying, both signals are shown
-  with source labels so you can decide
+### Evening watchlist and intraday confirmation
 
-Volatility strategies fail closed for live alerts when India VIX is `fallback` or `stale`.
-Suppressed strategies and contract-validation reasons are included in the Telegram summary.
-Because bhavcopy does not include bid/ask, liquidity checks use premium, OI, and traded
-volume proxies and label that limitation.
+1. Validate the exact EOD session's spot candles and NSE option archive. Missing data is
+   reported explicitly, separately from a market with no strategy signals.
+2. Select each underlying's listed expiry at intended entry. Expiry-day entries default
+   off; policy settings control their cutoff and minimum remaining hours.
+3. Rank eligible setups using observed triggers, spread width and deterministic tie breaks.
+   Show one primary per underlying and alternatives separately. Ranking is a heuristic,
+   not a predicted probability of success.
+4. Confirm using completed intraday candles and fresh exact-contract quotes. ORB requires
+   the actual opening range; session VWAP requires actual traded volume. Index candles
+   with absent volume cannot confirm VWAP.
 
-**Strategy used by the bot:** `CombinedStrategy(TrendFollowing + RSI)` with current config
-params (fast MA 25, slow MA 75, RSI 14, oversold 25, overbought 65).
+Contract IV comes from the selected option premium, with comparisons to prior sessions
+of the same underlying, option type, tenor and nearby moneyness. India VIX is a regime
+feature, **not the selected contract's IV percentile**. Fewer than 20 comparable historical
+sessions leave volatility setups blocked; future observations never enter the baseline.
 
-**Setup:**
+Sizing distinguishes **lot size, lots and units**. It checks available cash, existing
+portfolio exposure, fees, spread, quote age and displayed depth. Duplicate contract
+exposure is aggregated before allocation. Paired legs retain equal quantities and one
+whole-trade budget. EOD sizing is an estimate; missing specifications leave quantities
+unavailable. Confirmation requires a verified portfolio snapshot no more than 60 seconds old.
 
-1. Create a bot via [@BotFather](https://t.me/BotFather), get the token
-2. Get your chat ID from [@userinfobot](https://t.me/userinfobot)
-3. Add as GitHub repository secrets: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+### Commands and outputs
 
-```bash
-# Run manually
-set TELEGRAM_BOT_TOKEN=your_token
-set TELEGRAM_CHAT_ID=your_chat_id
-python src/telegram_notify.py
+```powershell
+# Generate the EOD report; the date can be omitted for today.
+.venv-options\Scripts\python.exe main.py daily-report --as-of 2026-09-07
+
+# Offline status report without fetching market data.
+.venv-options\Scripts\python.exe main.py daily-report --as-of 2026-09-07 --offline
+
+# Confirm a saved EOD watchlist against archived intraday observations.
+.venv-options\Scripts\python.exe main.py daily-report --as-of 2026-09-07 --entry-at 2026-09-08T09:32:00+05:30 --watchlist reports/daily-signals/2026-09-07/watchlist.json --bars '^NSEI=data/nifty_minutes.csv' --quotes data/option_quotes.csv --contract-master data/contracts.csv --portfolio data/portfolio.json --iv-history data/iv_history.csv --output reports/confirmation/2026-09-08
 ```
+
+These commands require your own data files where paths are supplied. Repeat `--bars`
+for additional underlyings. The default next-weekday entry date is provisional, not an
+exchange holiday calendar. Replay timestamps must include timezone offsets and bars
+must represent completed intervals.
+
+| Output | Purpose |
+| --- | --- |
+| `report.md` | Readable daily watchlist, confirmation status and no-trade reasons |
+| `report.json` | Structured decisions, sizing, exposure and report-coverage fields |
+| `watchlist.json` | Dated, validated EOD candidates for later confirmation |
+| `iv_observations.csv` | Contract IV observations to archive for future comparisons |
+
+Without `--watchlist`, `--offline` produces a missing-data report. Saved watchlists must
+match `--as-of`. See the [options engine guide](docs/options_engine.md#two-stage-daily-signal-quality)
+for portfolio/history schemas and `--policy` settings.
+
+### Provider requirements
+
+The read-only **Upstox** adapter was selected for the free-data preference. It uses the
+documented intraday-candle and full-quote APIs; the integration was verified with mocked
+responses, not an authenticated live account. Supply `UPSTOX_ACCESS_TOKEN` securely in
+the environment, official instrument-key mappings, contract specifications and a fresh
+portfolio snapshot. Do not put credentials in reports or source control.
+
+Use `--provider upstox --instruments data/upstox_instruments.json` with the saved
+watchlist, contract master and portfolio. Omit `--entry-at` for live Upstox: the decision
+timestamp is captured after data acquisition. Missing or stale observations cannot
+confirm an entry. Historical confirmation uses CSV replay, not current API responses
+relabeled as historical data.
+
+Bhavcopy supplies **EOD premiums/OI/volume**, not intraday bid/ask quotes. Comparable IV
+history must be archived separately and passed with `--iv-history`; it is not fabricated
+from India VIX. See [verified provider capabilities](docs/options_engine.md#verified-provider-capabilities)
+for official API references, instrument mapping and remaining limitations.
+
+### Chronological evaluation and coverage
+
+```powershell
+.venv-options\Scripts\python.exe main.py evaluate-signals --ticker '^NSEI' --bars data/nifty_minutes.csv --quotes data/option_quotes.csv --contract-master data/contracts.csv --train-sessions 60 --test-sessions 20 --holdout-sessions 20 --report-journal reports/daily-signals --output reports/quality-evaluation
+```
+
+The runner selects ORB/VWAP and expiry-day policies using expanding training windows,
+evaluates subsequent unseen sessions, and reserves a separate final holdout. It writes
+`evaluation.json` with net expectancy, trade count, win rate and drawdown, broken down
+by strategy, underlying, entry expiry distance and prior-session market conditions.
+Breakdowns use realized subgroup P&L drawdown; fold/holdout summaries also include
+observed intraday equity drawdown. This runner does not evaluate every EOD strategy.
+
+Daily report coverage and actionable-report frequency are counted separately from the
+report journal. Their denominator is observed bar sessions, so a complete session
+archive is required to assess coverage. Synthetic replay/regression results establish
+execution behavior only. **No improved accuracy or profitability is claimed.**
+
+### Storage and notifications
+
+- `data/signal-bhavcopy/`: separate 14-day option cache, with one cache snapshot key per IST date.
+- Daily reports and signal-data diagnostics: seven-day workflow artifact retention.
+- `data/bhavcopy/`: full historical archive, untouched by signal-cache cleanup.
+
+The daily workflow no longer invokes the Telegram sender. Legacy Telegram functions,
+the separate stock-screener notifications, and weekly email remain separate features.
 
 ---
 
@@ -509,7 +595,7 @@ python src/telegram_notify.py
 
 GitHub Actions can replay the completed trading week every Saturday at 9:00 AM IST and email
 a strategy scoreboard plus trade evidence. This is the feedback loop for tuning thresholds:
-daily Telegram alerts propose trades; the weekly review shows which strategies actually paid,
+daily reports identify watchlist setups; the weekly review shows simulated strategy outcomes,
 which exits fired, and where IV/target/stop parameters need work. Friday signals that would
 execute after the reviewed week are left pending and are not counted as realized trades.
 
@@ -573,7 +659,7 @@ python main.py screen --strategy cheap_to_moon --universe nse_tickers_template.t
 # Or use GitHub Actions UI to manually trigger the workflow
 ```
 
-**Setup:** Same as daily signals — requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets.
+**Setup:** The separate stock-screener workflow requires `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` repository secrets.
 
 The workflow:
 1. Downloads the latest market data and NSE stock universe
@@ -729,6 +815,11 @@ All JS, CSS, and Plotly data is embedded inline — no internet required to open
 
 ## Recent Improvements
 
+- Two-stage daily reports now separate EOD watchlists from intraday confirmation, with
+  contract-IV history gates, expiry-aware rules, ranked alternatives and shared portfolio sizing.
+- Read-only Upstox observations and offline CSV replay support the confirmation boundary.
+- Chronological ORB/VWAP evaluation includes separate holdout and report-coverage metrics.
+
 - Short option entries now use sell-side transaction costs, so short premium strategies include
   the correct STT/stamp-duty treatment at entry.
 - Strategies now receive an `on_trade_closed(trade)` lifecycle callback after the backtester exits
@@ -826,10 +917,13 @@ algo-trading/
 │       ├── core/                    # Simulation & mathematical engines
 │       │   ├── backtester.py        # Event-driven backtest engine & Trade dataclass
 │       │   ├── pricing.py           # Black-Scholes pricing + Greeks + expiry helpers
+│       │   ├── volatility.py        # Contract IV comparisons and entry-time expiry distance
+│       │   ├── intraday.py          # Quote-driven intraday execution replay
 │       │   └── risk_manager.py      # Position sizing + SL/target + drawdown gating
 │       ├── data/                    # Data ingestion & market data loaders
 │       │   ├── ingestion.py         # YFinance fetching + bhavcopy loader + ChainLookup
 │       │   ├── bhavcopy.py          # NSE bhavcopy downloader
+│       │   ├── providers.py         # Read-only Upstox and offline replay interfaces
 │       │   └── screener_fetcher.py  # Fundamental metrics scraper
 │       ├── strategies/              # Pluggable strategy registry
 │       │   ├── __init__.py          # Strategy registry & auto-discovery
@@ -853,9 +947,11 @@ algo-trading/
 │       │   └── stock_screener.py    # Multi-strategy equity screener
 │       ├── reporting/               # Analytics & dashboard rendering
 │       │   ├── metrics.py           # 15+ performance metrics + console summary
+│       │   ├── daily_signals.py     # EOD watchlists, confirmation and shared sizing
+│       │   ├── signal_evaluation.py # Chronological evaluation and report coverage
 │       │   └── html_generator.py    # HTML dashboard generator (Jinja2 + Plotly)
 │       └── notifications/           # Automated alert bots
-│           ├── telegram.py          # Daily signals via Telegram Bot API
+│           ├── telegram.py          # Legacy EOD formatting and Telegram sender
 │           └── screener_bot.py      # Biweekly stock screening results via Telegram
 │
 ├── scripts/                         # Standalone runner scripts
@@ -873,10 +969,11 @@ algo-trading/
 │   └── report_template.html         # Jinja2 HTML template
 ├── .github/
 │   └── workflows/
-│       ├── daily_signals.yml        # GitHub Actions: daily Telegram signals (weekdays 7:30 PM IST)
+│       ├── daily_signals.yml        # Daily report artifacts (weekdays 7:30 PM IST)
 │       └── biweekly_screener.yml    # GitHub Actions: biweekly stock screening (Tuesdays 6:00 PM IST)
 ├── data/
 │   ├── bhavcopy/                    # NSE F&O bhavcopy ZIP files (~2,300 files)
+│   ├── signal-bhavcopy/             # Separate 14-day daily-signal option cache
 │   ├── cache/                       # Intermediate data cache
 │   └── raw/                         # Downloaded OHLCV CSVs
 ├── reports/                         # HTML reports, trade CSVs, explorer/optimizer results
@@ -886,6 +983,10 @@ algo-trading/
 ---
 
 ## Disclaimer
+
+- Daily-report confirmation requires actual intraday data and validated portfolio inputs;
+  missing live data remains unconfirmed, and EOD quantities are estimates
+- Historical/research pricing behavior below does not supply live execution quotes
 
 - Options pricing falls back to Black-Scholes with India VIX as IV proxy when bhavcopy is
   unavailable for a given date; fallback usage is tagged in reports

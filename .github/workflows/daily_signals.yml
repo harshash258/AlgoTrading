@@ -70,11 +70,17 @@ jobs:
 
       # Generation prepares the exact-session bhavcopy with bounded retries.
       # A missing archive produces a data-status alert, not executable trades.
-      - name: Generate and send signals
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -m algo_trading.notifications.telegram
+      - name: Generate daily watchlist report
+        run: python main.py daily-report
+
+      - name: Upload daily report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-options-report
+          retention-days: 7
+          path: reports/daily-signals/
+          if-no-files-found: ignore
 
       # Always save the updated CSVs so the next run can use them.
       # The cache key includes run_id so a fresh entry is saved each time.

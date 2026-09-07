@@ -16,13 +16,17 @@ from algo_trading.data.intraday import session_signals
 
 class IntradayBacktester:
     def __init__(self, bars, quotes, underlying, contract_master, strategy="orb",
-                 starting_capital=500000, max_quote_age_seconds=30, max_spread_pct=10):
+                 starting_capital=500000, max_quote_age_seconds=30, max_spread_pct=10,
+                 allow_expiry_day=False, expiry_day_cutoff="12:00", min_hours_to_expiry=2):
         if bars.empty or bars.index.tz is None or quotes.index.tz is None:
             raise ValueError("Nonempty timezone-aware bars and quotes required")
         self.bars, self.quotes, self.underlying = bars, quotes, underlying
         self.master, self.strategy = contract_master, strategy
         self.starting_capital = starting_capital
         self.max_age, self.max_spread = max_quote_age_seconds, max_spread_pct
+        self.allow_expiry_day = allow_expiry_day
+        self.expiry_day_cutoff = time.fromisoformat(expiry_day_cutoff)
+        self.min_hours_to_expiry = min_hours_to_expiry
         self.trades, self.equity_curve, self.rejections = [], [], []
 
     def _quote(self, timestamp, expiry, strike, kind):
@@ -54,7 +58,10 @@ class IntradayBacktester:
                 quote = self._quote(ts, expiry, strike, kind)
                 spec = self.master.resolve(self.underlying, expiry, ts.date())
                 allowed, reason = rm.can_open_trade()
-                if quote is not None and spec and spec.settlement == "cash" and allowed:
+                from algo_trading.core.volatility import expiry_days
+                expiry_allowed = (expiry_days(expiry, ts) * 24 >= self.min_hours_to_expiry and
+                    (expiry != ts.date() or (self.allow_expiry_day and ts.time() < self.expiry_day_cutoff)))
+                if quote is not None and spec and spec.settlement == "cash" and allowed and expiry_allowed:
                     spread_pct = (quote.ask - quote.bid) / quote.ask * 100
                     fee = calculate_transaction_cost(quote.ask, spec.lot_size, 1, "buy", ts.date())
                     loss = quote.ask * spec.lot_size + fee
@@ -99,7 +106,7 @@ class IntradayBacktester:
             self.equity_curve.append({"date": ts, "capital": rm.equity})
             if position is None and signals.loc[ts] and ts.time() < time(15, 10) and not last_bar:
                 kind = "CE" if signals.loc[ts] > 0 else "PE"
-                expiries = self.master.expiries(self.underlying, ts.date(), min_days=1)
+                expiries = self.master.expiries(self.underlying, ts.date(), min_days=0 if self.allow_expiry_day else 1)
                 if expiries:
                     # Contract selection only sees quotes observed at signal time.
                     q = self.quotes
