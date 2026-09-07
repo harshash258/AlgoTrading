@@ -115,7 +115,7 @@ class RSIStrategy(BaseStrategy):
             return signals
 
         spot   = float(close.iloc[-1])
-        expiry = next_expiry(current_date, weekly=self.weekly)
+        expiry = self.resolve_expiry(data, current_date, weekly=self.weekly)
         prev   = self._prev_signal.get(underlying, "none")
 
         # ── Time stop check ──────────────────────────────────────

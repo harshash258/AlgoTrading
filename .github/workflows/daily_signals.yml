@@ -1,10 +1,10 @@
 name: Daily Trading Signals
 
 on:
-  # Run every weekday at 4:15 PM IST = 10:45 UTC
-  # (45 min after market close — ensures yfinance has today's candle)
+  # Run every weekday at 7:30 PM IST = 14:00 UTC.
+  # Allow more time for EOD files; publication is still verified, never assumed.
   schedule:
-    - cron: "45 10 * * 1-5"
+    - cron: "0 14 * * 1-5"
 
   # Also allow manual trigger from GitHub UI or phone
   workflow_dispatch:
@@ -13,6 +13,8 @@ jobs:
   send-signals:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      SIGNAL_BHAVCOPY_FOLDER: data/signal-bhavcopy
 
     steps:
       - name: Checkout repository
@@ -49,6 +51,25 @@ jobs:
           restore-keys: |
             market-data-${{ runner.os }}-
 
+      # One bounded snapshot per IST date, rather than one per workflow run.
+      - name: Determine option cache date
+        id: option-date
+        run: echo "date=$(TZ=Asia/Kolkata date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore recent option archives
+        id: option-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/signal-bhavcopy
+          key: option-recent-v1-${{ runner.os }}-${{ steps.option-date.outputs.date }}
+          restore-keys: |
+            option-recent-v1-${{ runner.os }}-
+
+      - name: Expire old signal-cache files
+        run: python -m algo_trading.data.cache_retention
+
+      # Generation prepares the exact-session bhavcopy with bounded retries.
+      # A missing archive produces a data-status alert, not executable trades.
       - name: Generate and send signals
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -63,3 +84,19 @@ jobs:
         with:
           path: data/raw
           key: market-data-${{ runner.os }}-${{ github.run_id }}
+
+      - name: Save recent option archives
+        if: success() && steps.option-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: data/signal-bhavcopy
+          key: option-recent-v1-${{ runner.os }}-${{ steps.option-date.outputs.date }}
+
+      - name: Upload option-data diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: signal-data-status
+          retention-days: 7
+          path: reports/signal-data/
+          if-no-files-found: ignore

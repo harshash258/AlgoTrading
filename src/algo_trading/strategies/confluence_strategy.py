@@ -305,7 +305,7 @@ class ConfluenceStrategy(BaseStrategy):
             and prev != "long_pe"
         )
 
-        expiry = next_expiry(current_date, weekly=self.weekly)
+        expiry = self.resolve_expiry(data, current_date, weekly=self.weekly)
 
         # ── Emit signals ──────────────────────────────────────────
         if ce_confluence:

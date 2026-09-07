@@ -171,7 +171,7 @@ class VWAPReversionStrategy(BaseStrategy):
                     self._outside_count[underlying] = 0
                     return signals
 
-        expiry = next_expiry(current_date, weekly=self.weekly)
+        expiry = self.resolve_expiry(data, current_date, weekly=self.weekly)
 
         # ── REVERSION MODE ────────────────────────────────────────
         # Signal fires when price crosses BACK inside the band

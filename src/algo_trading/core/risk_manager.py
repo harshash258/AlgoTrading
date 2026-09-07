@@ -8,6 +8,7 @@ Determines:
 """
 
 import logging
+import math
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,10 @@ class RiskManager:
         self.capital          = starting_capital
         self.peak_capital     = starting_capital
         self.open_positions   : set[str] = set()
+        self.reservations = {}
+        self.equity = starting_capital
+        self.day_start_equity = starting_capital
+        self.halted = False
 
     # ── Capital tracking ──────────────────────────────────────────
 
@@ -40,13 +45,33 @@ class RiskManager:
         """Current drawdown from peak capital, as a percentage."""
         if self.peak_capital == 0:
             return 0.0
-        return (self.peak_capital - self.capital) / self.peak_capital * 100.0
+        return (self.peak_capital - self.equity) / self.peak_capital * 100.0
+
+    @property
+    def available_capital(self):
+        return max(0.0, min(self.capital, self.equity) - sum(v[0] for v in self.reservations.values()))
+
+    def mark_to_market(self, unrealized):
+        self.equity = self.capital + unrealized
+        self.peak_capital = max(self.peak_capital, self.equity)
+        if self.drawdown_pct >= settings.MAX_DRAWDOWN_HALT_PCT:
+            self.halted = True
+
+    def structure_size(self, max_loss, required_capital):
+        if not all(math.isfinite(v) and v > 0 for v in (max_loss, required_capital)):
+            return 0
+        risk_budget = max(0, self.equity * settings.RISK_PER_TRADE_PCT / 100)
+        portfolio_budget = max(0, self.equity * settings.MAX_PORTFOLIO_RISK_PCT / 100
+                               - sum(v[1] for v in self.reservations.values()))
+        margin_budget = max(0, self.equity * settings.MAX_MARGIN_UTILIZATION_PCT / 100
+                            - sum(v[0] for v in self.reservations.values()))
+        return max(0, min(int(min(risk_budget, portfolio_budget) / max_loss),
+                          int(min(self.available_capital, margin_budget) / required_capital),
+                          settings.MAX_LOTS_PER_TRADE))
 
     def update_capital(self, pnl: float) -> None:
         """Update capital after a trade closes."""
         self.capital += pnl
-        if self.capital > self.peak_capital:
-            self.peak_capital = self.capital
         logger.debug(
             f"Capital updated: ₹{self.capital:,.0f} "
             f"(peak ₹{self.peak_capital:,.0f}, dd {self.drawdown_pct:.1f}%)"
@@ -62,6 +87,10 @@ class RiskManager:
           1. Max open positions reached
           2. Drawdown exceeds halt threshold
         """
+        if self.halted:
+            return False, "Portfolio drawdown halt"
+        if self.day_start_equity > 0 and (self.day_start_equity - self.equity) / self.day_start_equity * 100 >= settings.MAX_DAILY_LOSS_PCT:
+            return False, "Daily loss limit reached"
         if len(self.open_positions) >= settings.MAX_OPEN_POSITIONS:
             return False, f"Max positions ({settings.MAX_OPEN_POSITIONS}) reached"
 
@@ -76,11 +105,13 @@ class RiskManager:
 
         return True, "ok"
 
-    def register_open(self, trade_id: str) -> None:
+    def register_open(self, trade_id: str, required_capital=0.0, max_loss=0.0) -> None:
         self.open_positions.add(trade_id)
+        self.reservations[trade_id] = (required_capital, max_loss)
 
     def register_close(self, trade_id: str, pnl: float) -> None:
         self.open_positions.discard(trade_id)
+        self.reservations.pop(trade_id, None)
         self.update_capital(pnl)
 
     # ── Position sizing ───────────────────────────────────────────
@@ -97,17 +128,17 @@ class RiskManager:
         For option buying  : risk = premium × lot_size × lots (max loss if goes to 0)
         For option selling : risk = BUY_STOP_LOSS_PCT × premium received
 
-        Returns at least 1 lot, capped so total cost ≤ available capital.
+        Returns zero when one lot exceeds the risk budget or free capital.
         """
-        if premium <= 0 or lot_size <= 0:
-            return 1
+        if not math.isfinite(premium) or premium <= 0 or lot_size <= 0:
+            return 0
 
-        risk_amount      = self.capital * risk_pct / 100.0
+        risk_amount      = max(0, self.equity * risk_pct / 100.0)
         cost_per_lot     = premium * lot_size
-        lots_by_risk     = max(int(risk_amount / cost_per_lot), 1)
+        lots_by_risk     = max(int(risk_amount / cost_per_lot), 0)
 
         # Cap by available capital (don't blow entire account on one trade)
-        max_affordable   = max(int(self.capital / cost_per_lot), 1)
+        max_affordable   = max(int(self.available_capital / cost_per_lot), 0)
         lots             = min(lots_by_risk, max_affordable)
 
         # Hard cap — never exceed MAX_LOTS_PER_TRADE regardless of capital size
@@ -153,3 +184,7 @@ class RiskManager:
         self.capital        = self.starting_capital
         self.peak_capital   = self.starting_capital
         self.open_positions = set()
+        self.reservations = {}
+        self.equity = self.starting_capital
+        self.day_start_equity = self.starting_capital
+        self.halted = False

@@ -193,7 +193,7 @@ class ORBStrategy(BaseStrategy):
                     self._entry_date[underlying]  = None
                     return signals
 
-        expiry = next_expiry(current_date, weekly=self.weekly)
+        expiry = self.resolve_expiry(data, current_date, weekly=self.weekly)
 
         # ── Emit signals ──────────────────────────────────────────
         if bullish_breakout and prev != "long_ce":

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional, Type, Dict, Any
 import logging
+from types import SimpleNamespace
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -94,12 +95,27 @@ class BaseStrategy(ABC):
         """
         ...
 
+    def resolve_expiry(self, data, current_date, weekly=False):
+        from algo_trading.core.pricing import next_expiry
+        expiries = data.attrs.get("contract_expiries", [])
+        if not expiries:
+            return next_expiry(current_date, weekly=weekly)
+        if weekly:
+            return min(expiries)
+        first = min(expiries)
+        return max(e for e in expiries if (e.year, e.month) == (first.year, first.month))
+
     def get_params(self) -> dict:
         """
         Return a dict of strategy parameters for embedding in reports.
         Override in subclass to expose strategy-specific config values.
         """
         return {"strategy": self.name}
+
+    def on_entry_rejected(self, signal):
+        self.on_trade_closed(SimpleNamespace(underlying=signal.underlying,
+                                            option_type=signal.option_type,
+                                            entry_meta=signal.meta))
 
     def on_trade_closed(self, trade) -> None:
         """
@@ -123,6 +139,9 @@ class BaseStrategy(ABC):
         entry_date = getattr(self, "_entry_date", None)
         if isinstance(entry_date, dict):
             entry_date[underlying] = None
+        in_trade = getattr(self, "_in_trade", None)
+        if isinstance(in_trade, dict):
+            in_trade[underlying] = False
 
         for attr in ("_pending", "_pending_dir"):
             pending = getattr(self, attr, None)

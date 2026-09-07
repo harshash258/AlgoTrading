@@ -5,6 +5,7 @@ algo_trading.reporting.metrics — Performance metrics computation and console f
 import sys
 import math
 import logging
+from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 from datetime import date
@@ -13,6 +14,26 @@ import config
 from algo_trading.core.backtester import Trade
 
 logger = logging.getLogger(__name__)
+
+
+def aggregate_positions(trades):
+    groups = {}
+    for trade in trades:
+        groups.setdefault(trade.group_id or trade.id, []).append(trade)
+    positions = []
+    for group_id, legs in groups.items():
+        net = sum(l.net_pnl for l in legs)
+        basis = legs[0].entry_meta.get("structure_max_loss") or sum(abs(l.entry_premium * l.lots * l.lot_size) for l in legs)
+        positions.append(SimpleNamespace(
+            id=group_id, net_pnl=net, pnl_pct=100 * net / basis if basis else 0,
+            held_days=max(l.held_days for l in legs),
+            entry_delta=sum((1 if l.direction == "long" else -1) * l.entry_delta for l in legs),
+            entry_theta=sum((1 if l.direction == "long" else -1) * l.entry_theta for l in legs),
+            entry_premium=sum(abs(l.entry_premium) for l in legs),
+            entry_date=min(l.entry_date for l in legs), expiry=legs[0].expiry,
+            structure_type=legs[0].structure_type, entry_iv=legs[0].entry_iv,
+        ))
+    return positions
 
 
 def compute_metrics(
@@ -34,8 +55,12 @@ def compute_metrics(
     dict with all metrics (keys match column names in HTML report)
     """
     if not trades:
-        return _empty_metrics(starting_capital)
+        return {**_empty_metrics(starting_capital), "pricing_mode": equity_curve.attrs.get("pricing_mode", "unknown"),
+                "pricing_counts": equity_curve.attrs.get("pricing_counts", {}),
+                "rejected_entries": len(equity_curve.attrs.get("rejections", []))}
 
+    leg_count = len(trades)
+    trades = aggregate_positions(trades)
     pnl_pcts    = [t.pnl_pct for t in trades]
     net_pnls    = [t.net_pnl for t in trades]
     held_days   = [t.held_days for t in trades]
@@ -80,7 +105,7 @@ def compute_metrics(
         sortino_per_trade = 0.0
 
     # Max Drawdown & CAGR from equity curve
-    max_dd = _max_drawdown(equity_curve)
+    max_dd = _max_drawdown(equity_curve, starting_capital)
     cagr   = _cagr(equity_curve, starting_capital, final_capital)
 
     # Average entry delta & theta
@@ -89,7 +114,23 @@ def compute_metrics(
     avg_delta = float(np.mean(deltas)) if deltas else 0.0
     avg_theta = float(np.mean(thetas)) if thetas else 0.0
 
+    daily = equity_curve["capital"].pct_change().dropna() if not equity_curve.empty else pd.Series(dtype=float)
+    if not equity_curve.empty:
+        daily = pd.concat([pd.Series([equity_curve["capital"].iloc[0] / starting_capital - 1]), daily])
+    excess = daily - config.RISK_FREE_RATE / 252
+    daily_std = excess.std(ddof=1)
+    sharpe = float(excess.mean() / daily_std * np.sqrt(252)) if pd.notna(daily_std) and daily_std > 0 else 0.0
+    downside_dev = float(np.sqrt(np.mean(np.minimum(excess, 0) ** 2))) if len(excess) else 0
+    sortino = float(excess.mean() / downside_dev * np.sqrt(252)) if downside_dev > 0 else 0.0
     return {
+        "total_legs": leg_count,
+        "sharpe_ratio": round(sharpe, 3),
+        "sortino_ratio": round(sortino, 3),
+        "pricing_mode": equity_curve.attrs.get("pricing_mode", "unknown"),
+        "pricing_counts": equity_curve.attrs.get("pricing_counts", {}),
+        "rejected_entries": len(equity_curve.attrs.get("rejections", [])),
+        "peak_margin_utilization_pct": float(equity_curve.get("margin_utilization_pct", pd.Series([0])).max()),
+        "worst_stress_loss": float(equity_curve.get("stress_loss", pd.Series([0])).max()),
         "total_trades"      : total_trades,
         "total_wins"        : len(wins),
         "total_losses"      : len(losses),
@@ -133,12 +174,12 @@ def _cagr(equity_curve: pd.DataFrame, starting_capital: float, final_capital: fl
         return 0.0
 
 
-def _max_drawdown(equity_curve: pd.DataFrame) -> float:
+def _max_drawdown(equity_curve: pd.DataFrame, starting_capital=None) -> float:
     """Compute maximum drawdown percentage from equity curve."""
     if equity_curve.empty or "capital" not in equity_curve.columns:
         return 0.0
 
-    cap = equity_curve["capital"]
+    cap = pd.concat([pd.Series([starting_capital if starting_capital is not None else equity_curve.attrs.get("starting_capital", equity_curve["capital"].iloc[0])]), equity_curve["capital"]], ignore_index=True)
     running_max = cap.cummax()
     drawdown = (running_max - cap) / running_max * 100.0
     return float(drawdown.max()) if not drawdown.empty else 0.0
@@ -147,6 +188,7 @@ def _max_drawdown(equity_curve: pd.DataFrame) -> float:
 def _empty_metrics(starting_capital: float) -> dict:
     """Return zeroed metrics dict when no trades occurred."""
     return {
+        "total_legs": 0, "sharpe_ratio": 0.0, "sortino_ratio": 0.0,
         "total_trades": 0, "total_wins": 0, "total_losses": 0,
         "win_rate_pct": 0.0, "profit_factor": 0.0, "total_return_pct": 0.0,
         "cagr_pct": 0.0, "max_drawdown_pct": 0.0, "avg_trade_pct": 0.0,
@@ -192,6 +234,11 @@ def trades_to_dataframe(trades: list[Trade]) -> pd.DataFrame:
             "pnl_pct"      : round(t.pnl_pct, 2),
             "held_days"    : t.held_days,
             "pricing_source": getattr(t, "pricing_source", ""),
+            "exit_pricing_source": t.exit_pricing_source,
+            "contract_spec_source": t.entry_meta.get("contract_spec_source", ""),
+            "fee_source": t.entry_meta.get("fee_source", ""),
+            "iv_source": t.entry_meta.get("iv_source", ""),
+            "entry_gamma": t.entry_gamma, "entry_vega": t.entry_vega,
             "vix_source"   : getattr(t, "vix_source", ""),
             "vix_warning"  : t.entry_meta.get("vix_warning", "") if getattr(t, "entry_meta", None) else "",
         })
@@ -214,7 +261,7 @@ def print_summary(metrics: dict, strategy_name: str = "") -> None:
     print(f"  Capital        : Rs. {metrics['starting_capital']:>12,.0f} -> Rs. {metrics['final_capital']:>12,.0f}")
     print(f"  Net P&L        : Rs. {metrics['net_pnl']:>+12,.0f}")
     print(sep)
-    print(f"  Total Trades   : {metrics['total_trades']}")
+    print(f"  Total Positions: {metrics['total_trades']}")
     print(f"  Win Rate       : {metrics['win_rate_pct']:.2f}%  ({metrics['total_wins']}W / {metrics['total_losses']}L)")
     print(f"  Total Return   : {metrics['total_return_pct']:+.2f}%")
     print(f"  CAGR           : {metrics['cagr_pct']:+.2f}%")
@@ -227,11 +274,27 @@ def print_summary(metrics: dict, strategy_name: str = "") -> None:
     print(f"  Avg Win        : {metrics['avg_win_pct']:+.2f}%")
     print(f"  Avg Loss       : {metrics['avg_loss_pct']:+.2f}%")
     print(f"  Profit Factor  : {metrics['profit_factor']:.3f}")
-    print(f"  Sharpe/Trade   : {metrics['sharpe_per_trade']:.3f}")
-    print(f"  Sortino/Trade  : {metrics['sortino_per_trade']:.3f}")
+    print(f"  Daily Sharpe   : {metrics['sharpe_ratio']:.3f}")
+    print(f"  Daily Sortino  : {metrics['sortino_ratio']:.3f}")
     print(sep)
     print(f"  Max Drawdown   : {metrics['max_drawdown_pct']:.2f}%")
     print(f"  Avg Held Days  : {metrics['avg_held_days']:.1f}")
     print(f"  Avg Entry Delta: {metrics['avg_entry_delta']:.4f}")
     print(f"  Avg Theta %/day: {metrics['avg_theta_pct']:.3f}%")
     print(f"{'='*50}\n")
+
+
+def position_breakdowns(trades):
+    """Position outcomes by structure, entry DTE and entry IV bucket."""
+    rows = []
+    for p in aggregate_positions(trades):
+        entry_day = p.entry_date.date() if isinstance(p.entry_date, pd.Timestamp) else p.entry_date
+        dte = (p.expiry - entry_day).days
+        rows.append({"structure": p.structure_type, "dte_bucket": "0-7" if dte <= 7 else "8-30" if dte <= 30 else "31+",
+                     "iv_bucket": "<15" if p.entry_iv < 15 else "15-25" if p.entry_iv <= 25 else ">25",
+                     "net_pnl": p.net_pnl, "win": p.net_pnl > 0})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    return df.groupby(["structure", "dte_bucket", "iv_bucket"]).agg(
+        positions=("net_pnl", "count"), net_pnl=("net_pnl", "sum"), win_rate=("win", "mean")).reset_index()

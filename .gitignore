@@ -11,6 +11,7 @@ build/
 
 # Virtual environment
 .venv/
+.venv-*/
 venv/
 env/
 
@@ -43,3 +44,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Short-lived CI signal cache, separate from historical bhavcopy
+data/signal-bhavcopy/

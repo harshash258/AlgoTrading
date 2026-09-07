@@ -8,16 +8,9 @@ When a strategy says SELL PE → inverse says SELL CE
 
 Exit signals are also flipped so the position tracking stays consistent.
 
-Why use this?
-  If a strategy's win rate is below 50%, its inverse is above 50%.
-  Run a backtest, check the metrics — if the strategy loses money,
-  wrap it in InverseStrategy and backtest again. One of them has edge.
-
-  Also useful for:
-  - Testing whether your signals have any predictive power at all
-    (a random strategy inverted should still be ~random)
-  - Mean-reversion vs trend-following: if your RSI strategy works
-    as a mean reversion play, its inverse is a momentum/breakout play
+This wrapper reverses directional CE/PE exposure while preserving buy/sell side.
+Inverting a losing strategy does not guarantee profitability. Multi-leg structures
+require a dedicated strategy, since swapping option types can invalidate hedges.
 
 Usage:
     from algo_trading.strategies.inverse_strategy import InverseStrategy
@@ -48,15 +41,18 @@ _FLIP_DIR    = {"long": "short", "short": "long"}
 
 def _flip_signal(sig: Signal) -> Signal:
     """
-    Return a new Signal with option_type and direction inverted.
+    Return a new directional Signal with option_type inverted.
 
-    Entry signals: CE↔PE, long↔short
-    Exit  signals: CE↔PE (direction kept — exit must match the open position)
+    Entry signals: CE↔PE, direction preserved
+    Exit signals: CE↔PE, direction preserved
 
     The expiry and strike are preserved so the backtester can still
     price the option correctly.
     """
+    if sig.structure_type != "single":
+        raise ValueError("Use a dedicated spread strategy to reverse multi-leg exposure")
     new_meta = dict(sig.meta)
+    new_meta["original_source_strategy"] = sig.meta.get("source_strategy")
     new_meta["inverted"] = True
     new_meta["original_option_type"] = sig.option_type
     new_meta["original_direction"]   = sig.direction
@@ -65,23 +61,25 @@ def _flip_signal(sig: Signal) -> Signal:
         return Signal(
             date        = sig.date,
             underlying  = sig.underlying,
-            direction   = _FLIP_DIR[sig.direction],
+            direction   = sig.direction,
             option_type = _FLIP_OPTION[sig.option_type],
             strike      = sig.strike,
             expiry      = sig.expiry,
             signal_type = "entry",
             meta        = new_meta,
+            execution_timing = sig.execution_timing,
         )
     else:
         # Exit: flip option_type so it matches the inverted open position
         return Signal(
             date        = sig.date,
             underlying  = sig.underlying,
-            direction   = _FLIP_DIR[sig.direction],
+            direction   = sig.direction,
             option_type = _FLIP_OPTION[sig.option_type],
             signal_type = "exit",
             exit_reason = sig.exit_reason,
             meta        = new_meta,
+            execution_timing = sig.execution_timing,
         )
 
 
@@ -114,9 +112,19 @@ class InverseStrategy(BaseStrategy):
         original_signals = self.strategy.generate_signals(data, vix, current_date)
         return [_flip_signal(s) for s in original_signals]
 
+    def on_trade_closed(self, trade):
+        from types import SimpleNamespace
+        meta = dict(getattr(trade, "entry_meta", {}))
+        source = meta.pop("original_source_strategy", None)
+        meta.pop("source_strategy", None)
+        if source:
+            meta["source_strategy"] = source
+        self.strategy.on_trade_closed(SimpleNamespace(
+            underlying=trade.underlying, option_type=_FLIP_OPTION[trade.option_type], entry_meta=meta))
+
     def get_params(self) -> dict:
         params = self.strategy.get_params()
         params["strategy"]  = self.name
         params["inverted"]  = True
-        params["note"]      = "All CE↔PE and long↔short signals are flipped"
+        params["note"]      = "CE/PE directional exposure is reversed; buy/sell side is preserved"
         return params

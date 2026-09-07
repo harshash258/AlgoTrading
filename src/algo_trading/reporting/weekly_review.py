@@ -85,15 +85,8 @@ def build_weekly_review(
                 end=week_end,
                 starting_capital=config.STARTING_CAPITAL,
             )
-            trades = [
-                trade for trade in bt.run()
-                if not (
-                    trade.entry_date == week_end
-                    and trade.exit_date == week_end
-                    and trade.exit_reason == "backtest_end"
-                )
-            ]
-            equity_curve = _equity_curve_from_trades(trades, week_start, week_end)
+            trades = bt.run()
+            equity_curve = bt.get_equity_curve()
             metrics = compute_metrics(trades, equity_curve, config.STARTING_CAPITAL)
 
             metric_rows.append({
@@ -105,7 +98,7 @@ def build_weekly_review(
                 "Avg Trade %": metrics["avg_trade_pct"],
                 "Profit Factor": metrics["profit_factor"],
                 "Max DD %": metrics["max_drawdown_pct"],
-                "Sharpe": metrics["sharpe_per_trade"],
+                "Sharpe": metrics["sharpe_ratio"],
             })
 
             if trades:

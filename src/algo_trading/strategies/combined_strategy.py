@@ -57,10 +57,7 @@ class CombinedStrategy(BaseStrategy):
                     sig.meta["source_strategy"] = strategy.name
                 all_signals.extend(sigs)
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"Strategy {strategy.name} error on {current_date}: {e}"
-                )
+                raise RuntimeError(f"Strategy {strategy.name} failed on {current_date}") from e
         return all_signals
 
     def on_trade_closed(self, trade) -> None:

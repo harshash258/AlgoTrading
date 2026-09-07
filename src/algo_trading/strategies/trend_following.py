@@ -244,7 +244,7 @@ class TrendFollowingStrategy(BaseStrategy):
             if confirmed_pe and not in_downtrend:
                 confirmed_pe = False   # don't buy PE in an uptrend
 
-        expiry = next_expiry(current_date, weekly=self.weekly)
+        expiry = self.resolve_expiry(data, current_date, weekly=self.weekly)
 
         # ── Emit exit signals ─────────────────────────────────────
         # Time stop: if current position has been open too long without profit

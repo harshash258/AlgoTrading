@@ -28,7 +28,7 @@ SLIPPAGE_PCT          = 1.5            # % of premium slippage on entry & exit
 
 # Default stop loss / target per trade side
 BUY_STOP_LOSS_PCT     = 40.0           # exit buy if premium falls 40%
-BUY_TARGET_PCT        = 200.0          # exit buy if premium doubles
+BUY_TARGET_PCT        = 200.0          # exit buy after a 200% premium gain
 SELL_STOP_LOSS_PCT    = 100.0          # exit sell if premium hits 2x received
 SELL_TARGET_PCT       = 50.0           # exit sell if premium decays 50%
 
@@ -84,6 +84,16 @@ BHAVCOPY_SYMBOLS      = {
     "NIFTY_FIN_SERVICE.NS": "FINNIFTY",
 }
 EXECUTION_TIMING      = "next_open"      # next_open | same_day_close
+PRICING_MODE = "research"               # research | strict
+CONTRACT_MASTER_PATH = None             # archived specifications CSV; required in strict mode
+ALLOW_UNCOVERED_SHORTS = False
+MAX_PORTFOLIO_RISK_PCT = 10.0
+MAX_MARGIN_UTILIZATION_PCT = 80.0
+MAX_DAILY_LOSS_PCT = 3.0
+# Optional portfolio limits in units of the named Greek; None disables a limit.
+GREEK_LIMITS = {"delta": None, "gamma": None, "vega": None, "theta": None}
+STRESS_SPOT_SHOCKS = (-0.10, -0.05, 0.05, 0.10)
+STRESS_VOL_SHOCK = 0.10                # +10 volatility percentage points
 
 VIX_STALE_DAYS        = 3
 ALLOW_FALLBACK_VIX_BACKTEST = True
@@ -134,3 +144,6 @@ REPORT_ROWS_PER_PAGE  = 50
 WEEKLY_REVIEW_DIR     = "reports/weekly"
 WEEKLY_REVIEW_RECIPIENTS = []  # fallback when WEEKLY_EMAIL_TO is not set
 SMTP_TLS              = True
+
+# CSV of effective-dated transaction charge rates; None uses labeled current-rate estimates.
+FEE_SCHEDULE_PATH = None

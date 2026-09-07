@@ -303,7 +303,7 @@ _COLUMN_ALIASES = {
     "close"     : ["CLOSE", "ClsPric"],
     "settle"    : ["SETTLE_PR", "SttlmPric"],
     "oi"        : ["OPEN_INT", "OpnIntrst"],
-    "volume"    : ["CONTRACTS", "TtlTradgVol", "TtlTrfVal"],
+    "volume"    : ["CONTRACTS", "TtlTradgVol"],
     "date"      : ["TIMESTAMP", "TradDt", "DATE"],
 }
 
@@ -326,6 +326,16 @@ def _map_bhavcopy_columns(cols: list) -> dict:
             if canon in found:
                 break
     return found
+
+
+def parse_exchange_dates(values):
+    """UDiFF ISO dates are year-first; legacy files contain day-first dates."""
+    text = values.astype(str).str.strip()
+    iso = text.str.match(r"^\d{4}-\d{2}-\d{2}$")
+    result = pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+    result.loc[iso] = pd.to_datetime(text.loc[iso], format="%Y-%m-%d", errors="coerce")
+    result.loc[~iso] = pd.to_datetime(text.loc[~iso], format="mixed", errors="coerce", dayfirst=True)
+    return result
 
 
 def load_bhavcopy(
@@ -381,8 +391,8 @@ def load_bhavcopy(
     df = df[df["opt_type"].astype(str).str.upper().str.strip().isin(["CE", "PE"])]
 
     # Parse dates and numerics
-    df["expiry"] = pd.to_datetime(df["expiry"], errors="coerce", dayfirst=True)
-    df["date"]   = pd.to_datetime(df.get("date", pd.NaT), errors="coerce", dayfirst=True)
+    df["expiry"] = parse_exchange_dates(df["expiry"])
+    df["date"]   = parse_exchange_dates(df["date"]) if "date" in df else pd.NaT
     df["strike"] = pd.to_numeric(df["strike"], errors="coerce")
 
     for col in ("close", "settle", "oi", "volume", "open", "high", "low"):
@@ -391,7 +401,7 @@ def load_bhavcopy(
 
     keep_cols = [c for c in ["date","expiry","strike","opt_type","open","high","low","close","settle","oi","volume"] if c in df.columns]
     out = df[keep_cols].dropna(subset=["expiry", "strike", "close"])
-    out = out[out["close"] > 0]
+    out = out[out["close"] >= 0]
     return out.reset_index(drop=True)
 
 
@@ -494,7 +504,9 @@ class ChainLookup:
     def nearest_expiry(self, trade_date, min_days: int = 0) -> pd.Timestamp | None:
         """Return nearest expiry at least min_days after trade_date."""
         target = pd.Timestamp(trade_date) + pd.Timedelta(days=min_days)
-        later  = self._expiries[self._expiries >= np.datetime64(target)]
+        available = self._rows.loc[pd.Timestamp(trade_date)] if self.has_data_for(trade_date) else None
+        expiries = available.index.get_level_values("expiry").unique() if available is not None else []
+        later = sorted(e for e in expiries if e >= target)
         return pd.Timestamp(later[0]) if len(later) else None
 
     def nearest_strike(self, strike: float) -> float:
@@ -550,9 +562,9 @@ class ChainLookup:
             return None, {"price_source": "missing"}
         candidates = []
         if price_preference == "open":
-            candidates = ["open", "close", "settle"]
+            candidates = ["open"]
         else:
-            candidates = [self.price_col, "close", "settle", "open"]
+            candidates = [self.price_col, "close", "settle"]
         for col in candidates:
             val = row.get(col)
             if pd.notna(val) and float(val) > 0:
@@ -586,14 +598,33 @@ class ChainLookup:
                 moneyness = k / spot
                 if abs(moneyness - 1.0) > moneyness_range:
                     continue
+                from algo_trading.core.pricing import implied_volatility, bs_greeks, time_to_expiry
+                maturity = time_to_expiry(pd.Timestamp(trade_date).date(), pd.Timestamp(expiry).date())
+                iv = implied_volatility(px, spot, k, maturity, config.RISK_FREE_RATE, opt_type)
+                greeks = bs_greeks(spot, k, maturity, config.RISK_FREE_RATE, iv, opt_type) if iv else {}
                 rows.append({
+                    "iv": iv,
+                    **greeks,
                     "strike"   : k,
                     "type"     : opt_type,
                     "premium"  : px,
                     "moneyness": round(moneyness, 4),
                 })
-        return pd.DataFrame(rows).sort_values(["type", "strike"])
+        return pd.DataFrame(rows).sort_values(["type", "strike"]) if rows else pd.DataFrame()
 
     def has_data_for(self, trade_date) -> bool:
         """Check if any data exists for a given date."""
         return pd.Timestamp(trade_date) in self._dates
+
+    def volatility_surface(self, trade_date, spot):
+        """Observed contract IV by strike/expiry, exposing skew and term structure."""
+        if not self.has_data_for(trade_date):
+            return pd.DataFrame()
+        frames = []
+        for expiry in self._rows.loc[pd.Timestamp(trade_date)].index.get_level_values("expiry").unique():
+            frame = self.smile(trade_date, expiry, spot)
+            if not frame.empty:
+                frame["expiry"] = expiry
+                frame["dte"] = (expiry - pd.Timestamp(trade_date)).days
+                frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()

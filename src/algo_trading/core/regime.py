@@ -65,6 +65,9 @@ def summarize_regime_performance(trades_df: pd.DataFrame, min_trades: int) -> pd
     rows = []
     for (regime, strategy), group in trades_df.groupby(["Regime", "Strategy"]):
         n = len(group)
+        if "group_id" in group:
+            keys = group["group_id"].where(group["group_id"].notna() & group["group_id"].ne(""), group.index.astype(str))
+            n = keys.nunique()
         net_pnl = float(group["P&L ₹"].sum()) if "P&L ₹" in group else float(group["net_pnl"].sum())
         rows.append({
             "Regime": regime,

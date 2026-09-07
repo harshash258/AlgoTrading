@@ -266,9 +266,16 @@
   <!-- ── METRICS GRID ─────────────────────────────────────── -->
   <div class="section">
     <div class="section-title">Performance Metrics</div>
+    <p>Pricing mode: <strong>{{ diagnostics.pricing_mode }}</strong>.
+       Contract specifications: {{ diagnostics.contract_spec_sources | join(', ') }}.
+       Fees: {{ diagnostics.fee_sources | join(', ') }}.</p>
+    <p>Quote requests by source: {{ diagnostics.quote_requests_by_source }}.
+       Rejected entries: {{ diagnostics.rejections | length }}.
+       Daily-bar fills use OHLC proxies; synthetic prices are research estimates.</p>
+    <p>Win rate and profit factor count complete positions. Trade-log rows retain individual legs.</p>
     <div class="metrics-grid">
       {% set cards = [
-        ("Total Trades",    metrics.total_trades,         "neutral"),
+        ("Total Positions", metrics.total_trades,         "neutral"),
         ("Win Rate",        metrics.win_rate_pct|string + "%", "positive" if metrics.win_rate_pct >= 50 else "negative"),
         ("Total Return",    "{:+.2f}%".format(metrics.total_return_pct), "positive" if metrics.total_return_pct >= 0 else "negative"),
         ("CAGR",            "{:+.2f}%".format(metrics.cagr_pct), "positive" if metrics.cagr_pct >= 0 else "negative"),
@@ -279,8 +286,8 @@
         ("Avg Win",         "{:+.2f}%".format(metrics.avg_win_pct), "positive"),
         ("Avg Loss",        "{:+.2f}%".format(metrics.avg_loss_pct), "negative"),
         ("Profit Factor",   metrics.profit_factor, "positive" if metrics.profit_factor >= 1 else "negative"),
-        ("Sharpe/Trade",    metrics.sharpe_per_trade, "positive" if metrics.sharpe_per_trade >= 0 else "negative"),
-        ("Sortino/Trade",   metrics.sortino_per_trade, "positive" if metrics.sortino_per_trade >= 0 else "negative"),
+        ("Daily Sharpe",    metrics.sharpe_ratio, "positive" if metrics.sharpe_ratio >= 0 else "negative"),
+        ("Daily Sortino",   metrics.sortino_ratio, "positive" if metrics.sortino_ratio >= 0 else "negative"),
         ("Max Drawdown",    "{:.2f}%".format(metrics.max_drawdown_pct), "negative" if metrics.max_drawdown_pct > 10 else "neutral"),
         ("Avg Held Days",   metrics.avg_held_days, "neutral"),
         ("Wins / Losses",   "{}W / {}L".format(metrics.total_wins, metrics.total_losses), "neutral"),

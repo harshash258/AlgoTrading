@@ -97,6 +97,7 @@ class BacktestRealismTests(unittest.TestCase):
         bt = Backtester(
             OneShotStrategy([sig]),
             _market_data(),
+            starting_capital=5_000_000,
             start=date(2026, 9, 4),
             end=date(2026, 9, 8),
         )
@@ -147,6 +148,7 @@ class BacktestRealismTests(unittest.TestCase):
                 date(2026, 9, 4),
                 date(2026, 9, 8),
                 execution_timing="same_day_close",
+            starting_capital=5_000_000,
             )
             bt.run()
 
@@ -172,6 +174,7 @@ class BacktestRealismTests(unittest.TestCase):
             date(2026, 9, 4),
             date(2026, 9, 8),
             execution_timing="same_day_close",
+            starting_capital=5_000_000,
         )
 
         bt.run()
@@ -187,6 +190,7 @@ class BacktestRealismTests(unittest.TestCase):
             date(2026, 9, 4),
             date(2026, 9, 8),
             execution_timing="same_day_close",
+            starting_capital=5_000_000,
         )
 
         trades = bt.run()
@@ -199,7 +203,7 @@ class TelegramValidationTests(unittest.TestCase):
     def test_volatility_strategy_suppressed_on_fallback_vix(self):
         sig = Signal(date=date(2026, 9, 4), underlying="^NSEI", direction="long", option_type="CE")
         with patch.object(telegram, "_all_strategies", return_value=[("Long Straddle (Low IV)", OneShotStrategy([sig]))]):
-            collected, suppressed = telegram._collect_signals(_market_data(vix_source="fallback"), date(2026, 9, 4))
+            collected, suppressed = telegram._collect_signals(_market_data(dates=["2026-09-04"], vix_source="fallback"), date(2026, 9, 4))
 
         self.assertEqual(collected, {})
         self.assertTrue(any("VIX source is fallback" in item for item in suppressed))

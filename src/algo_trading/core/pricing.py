@@ -12,10 +12,22 @@ from datetime import date, timedelta
 
 import numpy as np
 from scipy.stats import norm
+from scipy.optimize import brentq
 
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def implied_volatility(premium, S, K, T, r, option_type):
+    """Invert a European premium, returning None for inconsistent/expired quotes."""
+    if not all(np.isfinite(x) for x in (premium, S, K, T, r)) or min(S, K, T, premium) <= 0:
+        return None
+    try:
+        return float(brentq(lambda sigma: bs_price(S, K, T, r, sigma, option_type) - premium,
+                            0.00001, 5.0))
+    except ValueError:
+        return None
 
 
 def bs_price(
@@ -179,17 +191,24 @@ def calculate_transaction_cost(
     lot_size: int,
     num_lots: int,
     side: str,
+    trade_date: date | None = None,
 ) -> float:
     """Calculate total transaction cost for one options order."""
+    rates = settings
+    if settings.FEE_SCHEDULE_PATH:
+        from algo_trading.core.fees import fee_rates
+        if trade_date is None:
+            raise ValueError("A trade date is required for historical transaction costs")
+        rates = fee_rates(settings.FEE_SCHEDULE_PATH, trade_date)
     turnover = premium * lot_size * num_lots
 
-    brokerage = min(settings.BROKERAGE_PER_ORDER, turnover * settings.BROKERAGE_MAX_PCT / 100)
-    stt_rate = settings.STT_SELL_PCT if side == "sell" else settings.STT_BUY_PCT
+    brokerage = min(rates.BROKERAGE_PER_ORDER, turnover * rates.BROKERAGE_MAX_PCT / 100)
+    stt_rate = rates.STT_SELL_PCT if side == "sell" else rates.STT_BUY_PCT
     stt = turnover * stt_rate / 100
-    exchange = turnover * settings.EXCHANGE_CHARGE_PCT / 100
-    gst = (brokerage + exchange) * settings.GST_PCT / 100
-    sebi = (turnover / 1e7) * settings.SEBI_CHARGE_PER_CR
-    stamp = (turnover * settings.STAMP_DUTY_BUY_PCT / 100) if side == "buy" else 0.0
+    exchange = turnover * rates.EXCHANGE_CHARGE_PCT / 100
+    gst = (brokerage + exchange) * rates.GST_PCT / 100
+    sebi = (turnover / 1e7) * rates.SEBI_CHARGE_PER_CR
+    stamp = (turnover * rates.STAMP_DUTY_BUY_PCT / 100) if side == "buy" else 0.0
 
     total = brokerage + stt + exchange + gst + sebi + stamp
     return round(total, 2)
