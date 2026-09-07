@@ -17,6 +17,7 @@ Environment variables required:
 import os
 import sys
 import logging
+import math
 import pandas as pd
 from html import escape
 from datetime import date, timedelta
@@ -433,6 +434,38 @@ def _validate_collected_signals(data: dict, collected: dict, today: date) -> tup
 # Message formatting
 # ─────────────────────────────────────────────────────────────────
 
+def _format_size_estimate(sigs: list[dict], ticker: str) -> str:
+    """Size long ideas independently against full premium loss, never stop guarantees."""
+    budget = config.STARTING_CAPITAL * config.RISK_PER_TRADE_PCT / 100
+    lot_size = config.LOT_SIZES.get(ticker, config.DEFAULT_LOT_SIZE)
+    lines = [
+        f"  Budget  : ₹{budget:,.0f} ({config.RISK_PER_TRADE_PCT}% configured capital), whole trade",
+        f"  Lot size: {lot_size} units per leg (configured; verify contract)",
+    ]
+    premiums = [s.get("meta", {}).get("validated_premium") for s in sigs]
+    if (any(s.get("is_short") or s.get("direction") == "short" for s in sigs)
+            or any(s.get("structure_type", "single") not in
+                   ("single", "straddle", "strangle", "long_straddle", "long_strangle") for s in sigs)
+            or (len(sigs) == 1 and sigs[0].get("structure_type", "single") != "single")
+            or not premiums or any(not isinstance(p, (int, float)) or not math.isfinite(p) or p <= 0 for p in premiums)
+            or not isinstance(lot_size, int) or lot_size <= 0):
+        lines.append("  Quantity: unavailable; complete structure and premium/margin sizing required")
+        return "\n".join(lines)
+    debit = sum(premiums) * lot_size
+    lots = max(0, math.floor(min(budget, config.STARTING_CAPITAL) / debit))
+    lines.extend([
+        "  Premium : " + " + ".join(f"₹{p:,.2f}" for p in premiums) + " per unit (bhavcopy close)",
+        f"  Est lots: {lots}" + (" per leg, equal quantity" if len(sigs) > 1 else ""),
+        f"  Quantity: {lots * lot_size} units per leg",
+        f"  Max loss: ₹{lots * debit:,.2f} premium debit, before fees",
+        "  Sizing  : full premium loss; stop-loss is not guaranteed",
+        "  Entry   : recalculate with live ask prices, fees and available capital",
+    ])
+    if lots == 0:
+        lines.append("  SKIP    : one lot exceeds the configured premium budget")
+    return "\n".join(lines)
+
+
 def _format_signal_block(sig_info: dict, spot: float, vix: float,
                           atm: int, ticker: str) -> str:
     """Format one signal into a Telegram-ready block."""
@@ -470,9 +503,6 @@ def _format_signal_block(sig_info: dict, spot: float, vix: float,
         sl_line  = f"SL      : -{config.BUY_STOP_LOSS_PCT:.0f}% of premium"
         tgt_line = f"Target  : +{config.BUY_TARGET_PCT:.0f}% of premium"
 
-    risk_amt  = config.STARTING_CAPITAL * config.RISK_PER_TRADE_PCT / 100
-    lots_hint = config.LOT_SIZES.get(ticker, config.DEFAULT_LOT_SIZE)
-
     label = _html_text(label)
     trigger = _html_text(trigger)
 
@@ -488,8 +518,7 @@ def _format_signal_block(sig_info: dict, spot: float, vix: float,
         f"{leg_line}"
         f"  {sl_line}\n"
         f"  {tgt_line}\n"
-        f"  Risk    : ₹{risk_amt:,.0f} ({config.RISK_PER_TRADE_PCT}% capital)\n"
-        f"  Lots    : {lots_hint}"
+        f"{_format_size_estimate([sig_info], ticker)}"
     )
 
 
@@ -577,8 +606,6 @@ def _format_paired_block(group: dict, spot: float, vix: float,
     expiry_str = expiry.strftime("%d %b '%y") if expiry else "—"
     trigger    = _html_text(meta.get("trigger", "vol cheap"))
 
-    risk_amt  = config.STARTING_CAPITAL * config.RISK_PER_TRADE_PCT / 100
-    lots_hint = config.LOT_SIZES.get(ticker, config.DEFAULT_LOT_SIZE)
     sl_line   = f"SL      : -{config.BUY_STOP_LOSS_PCT:.0f}% of premium (each leg)"
     tgt_line  = f"Target  : +{config.BUY_TARGET_PCT:.0f}% of premium (each leg)"
 
@@ -591,7 +618,7 @@ def _format_paired_block(group: dict, spot: float, vix: float,
 
     return (
         f"  <b>BUY VOLATILITY - {display_pair_type}</b>  [{label}]\n"
-        f"  View    : Big move expected; direction does not matter\n"
+        f"  View    : Seeks a move large enough to cover both premiums and costs\n"
         f"  {setup_line}\n"
         f"  Plan    : One non-directional trade; enter BOTH legs together\n"
         f"  {strike_line}\n"
@@ -600,8 +627,7 @@ def _format_paired_block(group: dict, spot: float, vix: float,
         f"  Trigger : {trigger}\n"
         f"  {sl_line}\n"
         f"  {tgt_line}\n"
-        f"  Risk    : ₹{risk_amt:,.0f} ({config.RISK_PER_TRADE_PCT}% capital) × 2 legs\n"
-        f"  Lots    : {lots_hint}"
+        f"{_format_size_estimate([ce_sig, pe_sig], ticker)}"
     )
 
 
@@ -632,6 +658,18 @@ def _format_ticker_block(ticker: str, ticker_data: dict) -> str:
 
     # Notes
     notes = []
+    ideas = [[g["ce"], g["pe"]] for g in paired_groups] + [[s] for s in standalone]
+    if len(ideas) > 1:
+        notes.append("  Ideas are sized independently; quantities are not a combined portfolio allocation.")
+    seen_contracts = set()
+    overlaps = set()
+    for idea in ideas:
+        contracts = {(s.get("expiry"), s.get("strike") or atm, s["option_type"]) for s in idea}
+        overlaps.update(seen_contracts & contracts)
+        seen_contracts.update(contracts)
+    if overlaps:
+        names = ", ".join(f"{strike:g} {kind} ({expiry})" for expiry, strike, kind in sorted(overlaps, key=str))
+        notes.append(f"  ⚠️ Overlap: {_html_text(names)} appears in multiple ideas. Taking both changes exposure; combine positions and recalculate risk before entry.")
     if paired_groups:
         pair_labels = ", ".join(_html_text(g["label"]) for g in paired_groups)
         notes.append(f"  📐 Vol trade: CE + PE is intentional, not a conflict ({pair_labels})")
