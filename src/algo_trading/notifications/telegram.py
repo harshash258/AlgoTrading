@@ -252,6 +252,14 @@ def _send_in_parts(messages: list[str], token: str, chat_id: str) -> bool:
 # Signal collection
 # ─────────────────────────────────────────────────────────────────
 
+def _set_live_expiries(frame, ticker: str, today: date) -> bool:
+    """Use this session's contracts, excluding expiry before next-open entry."""
+    lookup = _get_chain_lookup(ticker)
+    expiries = lookup.listed_expiries(today) if lookup is not None else []
+    frame.attrs["contract_expiries"] = [e for e in expiries if e > today]
+    return bool(frame.attrs["contract_expiries"])
+
+
 def _collect_signals(
     data: dict,
     today: date,
@@ -303,6 +311,11 @@ def _collect_signals(
                 )
                 continue
 
+            if not _set_live_expiries(df_copy, ticker, today):
+                reason = f"{TICKER_NAMES.get(ticker, ticker)}: no current listed expiries available for next-open entry"
+                if reason not in suppressed:
+                    suppressed.append(reason)
+                continue
             try:
                 sigs = strategy.generate_signals(df_copy, vix_series, today)
             except Exception as e:
@@ -926,6 +939,8 @@ def generate_signal_message(strategy=None) -> str:
             if df.empty or df.index.max().date() != today:
                 continue
             df.attrs["ticker"] = ticker
+            if not _set_live_expiries(df, ticker, today):
+                continue
             vix_series = df.get("VIX", None)
             if vix_series is None:
                 continue

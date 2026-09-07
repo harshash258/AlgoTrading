@@ -501,6 +501,13 @@ class ChainLookup:
             .sort_index()
         )
 
+    def listed_expiries(self, trade_date) -> list:
+        """Expiries actually present in this underlying's requested session."""
+        if not self.has_data_for(trade_date):
+            return []
+        rows = self._rows.loc[pd.Timestamp(trade_date)]
+        return sorted({pd.Timestamp(e).date() for e in rows.index.get_level_values("expiry")})
+
     def nearest_expiry(self, trade_date, min_days: int = 0) -> pd.Timestamp | None:
         """Return nearest expiry at least min_days after trade_date."""
         target = pd.Timestamp(trade_date) + pd.Timedelta(days=min_days)
