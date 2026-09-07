@@ -4,18 +4,9 @@ bhavcopy_downloader.py — Automated NSE F&O Bhavcopy downloader.
 NSE publishes daily option chain data (bhavcopy) for free.
 This module downloads them for a date range and stores in data/bhavcopy/.
 
-TWO URL FORMATS (NSE changed format on July 8, 2024):
-
-  Pre-Jul 2024 (legacy):
-    https://archives.nseindia.com/content/fo/BhavCopy_DDMMMYYYY.zip
-    e.g. BhavCopy_01JAN2023.zip
-    Columns: INSTRUMENT, SYMBOL, EXPIRY_DT, STRIKE_PR, OPTION_TYP,
-             OPEN, HIGH, LOW, CLOSE, SETTLE_PR, CONTRACTS, VAL_INLAKH,
-             OPEN_INT, CHG_IN_OI, TIMESTAMP
-
-  Post-Jul 2024 (UDiFF):
-    https://nsearchives.nseindia.com/content/fo/BhavCopy_DDMMMYYYY.zip
-    (Same URL pattern, different schema — columns renamed)
+Legacy archives use foDDMMMYYYYbhav.csv.zip. Since July 8, 2024, the UDiFF
+final archive uses BhavCopy_NSE_FO_0_0_0_YYYYMMDD_F_0000.csv.zip.
+Reference: https://www.nseindia.com/all-reports-derivatives
 
 NSE blocks headless requests. We use curl_cffi (already installed via yfinance)
 to mimic a real browser session, which handles the TLS fingerprinting NSE uses.
@@ -32,6 +23,8 @@ import sys
 import time
 import logging
 import argparse
+import io
+import zipfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -49,14 +42,14 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────
 
-BHAVCOPY_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "bhavcopy")
+BHAVCOPY_DIR = str(Path(__file__).resolve().parents[3] / "data" / "bhavcopy")
 
 # Legacy URL (pre Jul 8 2024) — correct NSE archives path
 # Format: fo{DDMMMYYYY}bhav.csv.zip inside DERIVATIVES/YYYY/MMM/
 LEGACY_URL = "https://archives.nseindia.com/content/historical/DERIVATIVES/{year}/{month}/fo{date}bhav.csv.zip"
 
 # New UDiFF URL (post Jul 8 2024)
-UDIFF_URL  = "https://nsearchives.nseindia.com/content/fo/BhavCopy_{date}.zip"
+UDIFF_URL  = "https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{date}_F_0000.csv.zip"
 
 # NSE format cutover date
 UDIFF_CUTOVER = date(2024, 7, 8)
@@ -123,7 +116,7 @@ def _url_for(d: date) -> str:
     year  = d.strftime("%Y")          # e.g. 2024
     month = d.strftime("%b").upper()  # e.g. JAN
     if d >= UDIFF_CUTOVER:
-        return UDIFF_URL.format(date=fmt)
+        return UDIFF_URL.format(date=d.strftime("%Y%m%d"))
     return LEGACY_URL.format(year=year, month=month, date=fmt)
 
 
@@ -145,6 +138,28 @@ def _trading_days(start: date, end: date) -> list[date]:
 
 # ── Download ─────────────────────────────────────────────────────
 
+def _valid_archive(content, expected_date):
+    """Verify ZIP integrity and the trade date inside the CSV, not just its name."""
+    import pandas as pd
+    from algo_trading.data.ingestion import _map_bhavcopy_columns, parse_exchange_dates
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            if archive.testzip() is not None:
+                return False
+            csvs = [name for name in archive.namelist() if name.lower().endswith(".csv")]
+            if len(csvs) != 1:
+                return False
+            with archive.open(csvs[0]) as stream:
+                frame = pd.read_csv(stream, low_memory=False)
+            mapping = _map_bhavcopy_columns(frame.columns)
+            if "date" not in mapping or frame.empty:
+                return False
+            dates = parse_exchange_dates(frame[mapping["date"]])
+            return dates.notna().all() and set(dates.dt.date) == {expected_date}
+    except (ValueError, KeyError, zipfile.BadZipFile, OSError):
+        return False
+
+
 def download_bhavcopy(
     d: date,
     session,
@@ -162,16 +177,18 @@ def download_bhavcopy(
     filepath = os.path.join(output_dir, fname)
 
     if os.path.exists(filepath) and not overwrite:
-        logger.debug(f"  {d}: already exists, skipping")
-        return filepath
+        if _valid_archive(Path(filepath).read_bytes(), d):
+            logger.debug(f"  {d}: already exists, skipping")
+            return filepath
+        logger.warning("Cached archive invalid for %s; retrying download", d)
 
     url = _url_for(d)
     try:
         resp = session.get(url, timeout=30)
 
         if resp.status_code == 404:
-            # Holiday or non-trading day — normal, not an error
-            logger.debug(f"  {d}: 404 (likely holiday/non-trading day)")
+            # May be unpublished, unavailable, or a non-trading date; do not infer a holiday.
+            logger.debug(f"  {d}: 404 (file unavailable or not yet published)")
             return None
 
         resp.raise_for_status()
@@ -183,8 +200,13 @@ def download_bhavcopy(
             logger.warning(f"  {d}: Response is not a ZIP file ({len(content)} bytes). Skipping.")
             return None
 
-        with open(filepath, "wb") as f:
+        if not _valid_archive(content, d):
+            logger.warning("Archive failed integrity/trade-date validation for %s", d)
+            return None
+        temporary = filepath + ".part"
+        with open(temporary, "wb") as f:
             f.write(content)
+        os.replace(temporary, filepath)
 
         size_kb = len(content) / 1024
         logger.info(f"  {d}: Downloaded {fname} ({size_kb:.1f} KB)")

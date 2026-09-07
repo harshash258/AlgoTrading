@@ -8,6 +8,7 @@ All JS/CSS/data is embedded inline — no internet required to open.
 import os
 import json
 import logging
+from pathlib import Path
 from datetime import date, datetime
 
 import pandas as pd
@@ -19,7 +20,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 from algo_trading.core.backtester import Trade
-from algo_trading.reporting.metrics import compute_metrics, trades_to_dataframe
+from algo_trading.reporting.metrics import compute_metrics, trades_to_dataframe, position_breakdowns
 
 logger = logging.getLogger(__name__)
 
@@ -42,17 +43,29 @@ def generate_html_report(
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    metrics  = compute_metrics(trades, equity_curve, config.STARTING_CAPITAL)
+    starting_capital = equity_curve.attrs.get("starting_capital", config.STARTING_CAPITAL)
+    metrics  = compute_metrics(trades, equity_curve, starting_capital)
     trades_df = trades_to_dataframe(trades)
 
     # Build all chart JSON
     equity_chart    = _equity_curve_chart(equity_curve)
-    heatmap_chart   = _monthly_heatmap(equity_curve, config.STARTING_CAPITAL)
+    heatmap_chart   = _monthly_heatmap(equity_curve, starting_capital)
     histogram_chart = _pnl_histogram(trades_df)
     bar_chart       = _pnl_bar_chart(trades_df)
 
+    # Keep machine-readable evidence alongside the human report.
+    stem = f"report_{strategy_name}_{date.today().isoformat()}"
+    diagnostics = {"pricing_mode": equity_curve.attrs.get("pricing_mode", "unknown"),
+                   "quote_requests_by_source": equity_curve.attrs.get("pricing_counts", {}),
+                   "rejections": equity_curve.attrs.get("rejections", []),
+                   "contract_spec_sources": sorted({t.entry_meta.get("contract_spec_source", "unknown") for t in trades}),
+                   "fee_sources": sorted({t.entry_meta.get("fee_source", "unknown") for t in trades})}
+    (Path(output_dir) / f"{stem}_diagnostics.json").write_text(json.dumps(diagnostics, default=str, indent=2), encoding="utf-8")
+    position_breakdowns(trades).to_csv(Path(output_dir) / f"{stem}_breakdowns.csv", index=False)
+    equity_curve.to_csv(Path(output_dir) / f"{stem}_equity.csv")
+
     # Render template
-    template_dir = os.path.join(os.path.dirname(__file__), "..", config.TEMPLATES_DIR)
+    template_dir = Path(__file__).resolve().parents[3] / config.TEMPLATES_DIR
     env = Environment(
         loader=FileSystemLoader(template_dir),
         autoescape=select_autoescape(["html"]),
@@ -65,6 +78,7 @@ def generate_html_report(
         backtest_start   = backtest_start,
         backtest_end     = backtest_end,
         metrics          = metrics,
+        diagnostics      = diagnostics,
         strategy_params  = strategy_params,
         trades_json      = trades_df.to_json(orient="records", date_format="iso"),
         equity_chart     = equity_chart,

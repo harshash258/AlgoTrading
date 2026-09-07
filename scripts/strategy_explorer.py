@@ -84,7 +84,12 @@ logger = logging.getLogger(__name__)
 
 def _build_registry() -> dict:
     """Return a dict of name → factory_fn for every strategy."""
+    from algo_trading.strategies.vertical_spread import BullCallSpread, BearPutSpread, BullPutSpread, BearCallSpread
     return {
+        "bull_call_spread": BullCallSpread,
+        "bear_put_spread": BearPutSpread,
+        "bull_put_spread": BullPutSpread,
+        "bear_call_spread": BearCallSpread,
         # ── Directional / trend ───────────────────────────────────
         "trend": lambda: TrendFollowingStrategy(
             fast_ma=config.TREND_FAST_MA,
@@ -261,7 +266,6 @@ def _run_combo(
         else:
             strategy = CombinedStrategy(strategies)
 
-        _backtester_module._chain_lookup = chain_lookup
 
         bt = Backtester(
             strategy=strategy,
@@ -269,6 +273,7 @@ def _run_combo(
             start=start,
             end=end,
             starting_capital=config.STARTING_CAPITAL,
+            chain_lookups=chain_lookup,
         )
         trades = bt.run()
         equity_curve = bt.get_equity_curve()
@@ -287,8 +292,8 @@ def _run_combo(
             "total_return_pct" : metrics["total_return_pct"],
             "cagr_pct"         : metrics["cagr_pct"],
             "profit_factor"    : metrics["profit_factor"],
-            "sharpe_per_trade" : metrics["sharpe_per_trade"],
-            "sortino_per_trade": metrics["sortino_per_trade"],
+            "sharpe_ratio" : metrics["sharpe_ratio"],
+            "sortino_ratio": metrics["sortino_ratio"],
             "max_drawdown_pct" : metrics["max_drawdown_pct"],
             "avg_held_days"    : metrics["avg_held_days"],
             "net_pnl"          : metrics["net_pnl"],
@@ -339,7 +344,7 @@ def _print_table(df: pd.DataFrame, title: str, n: int = 20) -> None:
             f"{i:>4} | {int(row['combo_size']):>4} | {int(row['total_trades']):>6} | "
             f"{row['win_rate_pct']:>6.2f} | {row['total_return_pct']:>+7.2f} | "
             f"{row['cagr_pct']:>+6.2f} | {pf_str:>6} | "
-            f"{row['sharpe_per_trade']:>7.3f} | {row['max_drawdown_pct']:>6.2f} | "
+            f"{row['sharpe_ratio']:>7.3f} | {row['max_drawdown_pct']:>6.2f} | "
             f"{row['avg_held_days']:>7.1f} | {combo_str}"
         )
     print(sep)
@@ -407,34 +412,10 @@ def run_explorer(
         raise RuntimeError(f"No market data for: {tickers}")
     print(f"  Loaded: {list(market_data.keys())}")
 
-    # ── Load bhavcopy chain (optional) ────────────────────────────
-    chain_lookup = None
-    if use_bhavcopy and config.BHAVCOPY_FOLDER:
-        bhavcopy_path = config.BHAVCOPY_FOLDER
-        if not os.path.isabs(bhavcopy_path):
-            bhavcopy_path = os.path.join(os.path.dirname(__file__), bhavcopy_path)
-        if os.path.isdir(bhavcopy_path):
-            print("\nLoading bhavcopy chain data (this takes ~30s)...")
-            try:
-                from src.data_ingestion import load_bhavcopy_folder
-                chain_df     = load_bhavcopy_folder(
-                    bhavcopy_path, symbol=config.BHAVCOPY_SYMBOL,
-                    pattern="fo*bhav.csv.zip",
-                )
-                chain_lookup = ChainLookup(chain_df)
-                print(f"  Chain loaded: {len(chain_df):,} rows")
-            except Exception as e:
-                print(f"  WARNING: {e}. Falling back to Black-Scholes.")
-        else:
-            print(f"  WARNING: BHAVCOPY_FOLDER not found — using Black-Scholes.")
-    else:
-        print("  Bhavcopy disabled — using Black-Scholes pricing.")
-        _orig_bhavcopy_folder = config.BHAVCOPY_FOLDER  # saved for restore
-        config.BHAVCOPY_FOLDER = ""
-        _backtester_module._chain_lookup = None
-
-    # Track whether we blanked BHAVCOPY_FOLDER so we can restore it
-    _blanked_bhavcopy = not use_bhavcopy
+    # The engine lazily loads each underlying's own chain. An empty mapping
+    # explicitly disables market data for synthetic-only research.
+    chain_lookup = None if use_bhavcopy else {}
+    _blanked_bhavcopy = False
 
     # ── Run all combinations ──────────────────────────────────────
     print(f"\nRunning {total} backtest(s)...\n")
@@ -460,7 +441,7 @@ def run_explorer(
                 best_so_far is None
                 or pf > best_so_far["profit_factor"]
                 or (pf == best_so_far["profit_factor"]
-                    and result["sharpe_per_trade"] > best_so_far["sharpe_per_trade"])
+                    and result["sharpe_ratio"] > best_so_far["sharpe_ratio"])
             ):
                 best_so_far = result
 
@@ -524,7 +505,7 @@ def run_explorer(
     print(f"    PF={best_overall['profit_factor']:.3f}  "
           f"CAGR={best_overall['cagr_pct']:+.2f}%  "
           f"WR={best_overall['win_rate_pct']:.1f}%  "
-          f"Sharpe={best_overall['sharpe_per_trade']:.3f}  "
+          f"Sharpe={best_overall['sharpe_ratio']:.3f}  "
           f"DD={best_overall['max_drawdown_pct']:.2f}%")
 
     # ── Vol balance check ─────────────────────────────────────────
@@ -592,7 +573,7 @@ def main():
         "--sort", default="profit_factor", metavar="METRIC",
         choices=[
             "profit_factor", "cagr_pct", "total_return_pct",
-            "sharpe_per_trade", "sortino_per_trade", "win_rate_pct",
+            "sharpe_ratio", "sortino_ratio", "win_rate_pct",
             "max_drawdown_pct", "total_trades",
         ],
         help="Metric to sort results by (default: profit_factor)",

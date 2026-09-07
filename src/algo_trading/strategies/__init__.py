@@ -23,6 +23,7 @@ from algo_trading.strategies.vwap_reversion import VWAPReversionStrategy
 from algo_trading.strategies.gap_fade import GapFadeStrategy
 from algo_trading.strategies.iron_condor import IronCondorStrategy
 from algo_trading.strategies.long_straddle import LongStraddleStrategy
+from algo_trading.strategies.vertical_spread import BullCallSpread, BearPutSpread, BullPutSpread, BearCallSpread
 
 __all__ = [
     "BaseStrategy",

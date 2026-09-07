@@ -5,6 +5,11 @@ for NSE index options (India). Supports directional, volatility, mean-reversion,
 delta-neutral strategies. Generates interactive HTML reports with full trade logs and charts.
 Daily signals delivered automatically via Telegram using GitHub Actions.
 
+**Options engine update:** exact-contract pricing, shared spread risk, mark-to-market equity,
+nested validation, four vertical-spread strategies and timestamped intraday replay are documented
+in [Options engine guide](docs/options_engine.md). Existing sample results predate these fixes
+and should be regenerated. Research fallback prices and historical specification proxies are labeled.
+
 ---
 
 ## Quick Start
@@ -208,85 +213,18 @@ python strategy_explorer.py --list
 - Vol-balance note — flags if top-10 combos pair a short-vol + long-vol strategy
 - CSV saved to `reports/strategy_explorer_YYYY-MM-DD.csv`
 
-### Sample Result (^NSEI, 2022–2023, singles only, Black-Scholes)
-
-| Rank | Strategy   | Trades | WR%   | Return% | CAGR%   | PF    | Sharpe | MaxDD% |
-|------|------------|--------|-------|---------|---------|-------|--------|--------|
-| 1    | trend      | 4      | 25.0% | +1.4%   | +0.7%   | 1.813 | 0.210  | 1.72%  |
-| 2    | orb        | 122    | 40.2% | +49.1%  | +22.3%  | 1.522 | 0.155  | 10.28% |
-| 3    | rsi        | 13     | 53.9% | +1.9%   | +1.0%   | 1.240 | 0.063  | 5.10%  |
-| 4    | vwap_brk   | 38     | 26.3% | +2.2%   | +1.1%   | 1.079 | 0.011  | 11.09% |
-| 5    | straddle   | 54     | 35.2% | −2.0%   | −1.0%   | 0.945 | −0.008 | 10.08% |
-| 6–10 | (others)  | —      | —     | negative| —       | <0.6  | <0     | 12–16% |
-
-*Note: run over the full 2015–2026 period for statistically meaningful sample sizes.*
-
----
-
 ## Parameter Optimization
 
-Two-level framework to find the best MA × RSI parameter combination.
-
-### Level 1 — Grid Search
-
 ```bash
-python main.py optimize              # full grid (~6,400 combos)
-python main.py optimize --quick      # reduced grid (~144 combos)
-python main.py optimize --top 5      # grid search then walk-forward on top 5
-python main.py optimize --min-trades 20
-python main.py optimize --ticker ^NSEI
+python main.py optimize --quick          # full execution for each combination
+python main.py optimize --quick --top 1  # nested train/test selection + reserved final year
 ```
 
-**What gets searched:**
-
-| Parameter        | Full grid values           | Quick grid values  |
-|------------------|----------------------------|--------------------|
-| `fast_ma`        | 5, 10, 15, 20, 25          | 10, 20, 25         |
-| `slow_ma`        | 30, 40, 50, 60, 75         | 40, 50, 75         |
-| `rsi_oversold`   | 25, 30, 35, 40             | 30, 35             |
-| `rsi_overbought` | 60, 65, 70, 75             | 65, 70             |
-| `stop_loss_pct`  | 40, 50, 60, 70             | 50, 60             |
-| `target_pct`     | 75, 100, 150, 200          | 100, 150           |
-
-**Speed trick:** `stop_loss_pct` and `target_pct` don't affect signal generation — only exit
-timing. Signals run once per (fast_ma × slow_ma × rsi) combo, then trades are replayed with
-different SL/target in O(trades) time. Reduces actual backtests from 6,400 → 400 (16× speedup).
-
-**Ranking:** Primary = Profit Factor. Tiebreaker = Sharpe per trade.
-
-After the run, best parameters are auto-written back to `config.py` with a diff printed.
-Results saved to `reports/optimization_results_YYYY-MM-DD.csv`.
-
-### Level 2 — Walk-Forward Validation
-
-Validates top-N param sets against unseen out-of-sample periods to catch overfitting.
-
-```bash
-python main.py optimize --top 5      # run Level 1 then Level 2 on top 5
-```
-
-**Rolling window (defaults):** 3-year train → 1-year test → step 1 year.
-
-**Example folds (2015–2026):**
-
-| Fold | Train period            | Test period |
-|------|-------------------------|-------------|
-| 1    | 2015-01-01 → 2017-12-31 | 2018        |
-| 2    | 2016-01-01 → 2018-12-31 | 2019        |
-| 3    | 2017-01-01 → 2019-12-31 | 2020        |
-| 4    | 2018-01-01 → 2020-12-31 | 2021        |
-| 5    | 2019-01-01 → 2021-12-31 | 2022        |
-| 6    | 2020-01-01 → 2022-12-31 | 2023        |
-| 7    | 2021-01-01 → 2023-12-31 | 2024        |
-| 8    | 2022-01-01 → 2024-12-31 | 2025        |
-
-**Per param set reports:**
-- Per-fold: `fold | train_pf | test_pf | return% | win_rate | dd% | trades`
-- Mean and std of out-of-sample profit factor across all folds
-- Consistency score: % of folds where PF > 1.0
-- Overfitting flag: raised when in-sample PF > out-of-sample PF by more than 50%
-
-Output: `reports/walk_forward_results_YYYY-MM-DD.csv`
+Each risk configuration replays the complete event path with fresh strategy state.
+Results are written to CSV and never applied automatically to configuration.
+Walk-forward searches within each training fold rather than preselecting parameters
+on the whole dataset. See the [options engine guide](docs/options_engine.md#optimization)
+for data requirements, holdout semantics and limitations.
 
 ---
 
@@ -532,7 +470,7 @@ leg-level details for auditability.
 
 ## Daily Signals via Telegram
 
-GitHub Actions sends signals every weekday at 4:15 PM IST (45 min after NSE close).
+GitHub Actions sends signals every weekday at 7:30 PM IST (45 min after NSE close).
 
 **What the bot sends:**
 - BUY CE / BUY PE per underlying
@@ -909,8 +847,8 @@ algo-trading/
 │       │   ├── gap_fade.py          # Fade opening gaps with no follow-through
 │       │   └── iron_condor.py       # Delta-neutral Iron Condor (chop regime)
 │       ├── optimization/            # Search & parameter optimization
-│       │   ├── grid_search.py       # Level 1: Grid search (16× speedup via replay)
-│       │   └── walk_forward.py      # Level 2: Walk-forward with overfitting detection
+│       │   ├── grid_search.py       # Full execution grid search
+│       │   └── walk_forward.py      # Nested walk-forward and final holdout
 │       ├── screener/                # Stock screening engine
 │       │   └── stock_screener.py    # Multi-strategy equity screener
 │       ├── reporting/               # Analytics & dashboard rendering
@@ -935,7 +873,7 @@ algo-trading/
 │   └── report_template.html         # Jinja2 HTML template
 ├── .github/
 │   └── workflows/
-│       ├── daily_signals.yml        # GitHub Actions: daily Telegram signals (weekdays 4:15 PM IST)
+│       ├── daily_signals.yml        # GitHub Actions: daily Telegram signals (weekdays 7:30 PM IST)
 │       └── biweekly_screener.yml    # GitHub Actions: biweekly stock screening (Tuesdays 6:00 PM IST)
 ├── data/
 │   ├── bhavcopy/                    # NSE F&O bhavcopy ZIP files (~2,300 files)

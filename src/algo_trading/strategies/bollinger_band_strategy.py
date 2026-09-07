@@ -263,7 +263,7 @@ class BollingerBandStrategy(BaseStrategy):
                 if confirmed_pe and spot > trend_ma_val:
                     confirmed_pe = False
 
-        expiry = next_expiry(current_date, weekly=self.weekly)
+        expiry = self.resolve_expiry(data, current_date, weekly=self.weekly)
 
         # ── Emit signals ──────────────────────────────────────────
         if confirmed_ce:

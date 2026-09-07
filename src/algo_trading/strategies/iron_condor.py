@@ -33,8 +33,7 @@ Exit:
   - Backtester handles structure-level SL/target across the four legs
 
 Four Signal objects are emitted per entry (one per leg).
-The backtester treats each as an independent Trade, so SL/target work
-per-leg as normal.
+The backtester validates and sizes the complete structure, with grouped exits.
 """
 
 import pandas as pd
@@ -185,7 +184,7 @@ class IronCondorStrategy(BaseStrategy):
         in_trade = self._in_trade.get(underlying, False)
 
         spot  = float(data["Close"].iloc[-1])
-        expiry = next_expiry(current_date, weekly=self.weekly)
+        expiry = self.resolve_expiry(data, current_date, weekly=self.weekly)
         T      = max((expiry - current_date).days / 365.0, 1 / 365)
         sigma  = current_vix / 100.0
         step   = config.STRIKE_STEPS.get(underlying, 50.0)
@@ -195,7 +194,7 @@ class IronCondorStrategy(BaseStrategy):
             entry_dt = self._entry_date.get(underlying)
             if entry_dt and (current_date - entry_dt).days >= self.time_stop_days:
                 # Exit all four legs
-                group_id = f"{underlying}:{self.name}"
+                group_id = f"{underlying}:{self.name}:{(self._entry_date.get(underlying) or current_date).isoformat()}"
                 for direction, opt_type in (
                     ("short", "CE"), ("long", "CE"),
                     ("short", "PE"), ("long", "PE"),
@@ -270,7 +269,7 @@ class IronCondorStrategy(BaseStrategy):
 
         # ── Exit: IV decayed / risk-off ───────────────────────────
         elif in_trade and iv_percentile <= self.iv_exit_pct:
-            group_id = f"{underlying}:{self.name}"
+            group_id = f"{underlying}:{self.name}:{(self._entry_date.get(underlying) or current_date).isoformat()}"
             for direction, opt_type in (
                 ("short", "CE"), ("long", "CE"),
                 ("short", "PE"), ("long", "PE"),

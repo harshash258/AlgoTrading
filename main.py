@@ -136,6 +136,14 @@ def get_strategy(name: str):
 
 def cmd_backtest(args):
     """Run a full backtest and generate HTML report."""
+    from algo_trading.core.contracts import ContractMaster
+    from config import settings
+    mode = getattr(args, "pricing_mode", settings.PRICING_MODE)
+    master_path = getattr(args, "contract_master", None) or settings.CONTRACT_MASTER_PATH
+    if mode == "strict" and not master_path:
+        raise ValueError("Strict mode requires --contract-master with archived specifications")
+    master = ContractMaster.from_csv(master_path) if master_path else ContractMaster()
+    settings.FEE_SCHEDULE_PATH = getattr(args, "fee_schedule", None) or settings.FEE_SCHEDULE_PATH
     tickers = args.ticker or config.UNDERLYINGS
     logger.info(f"Running backtest: {args.strategy} on {tickers}")
 
@@ -161,6 +169,7 @@ def cmd_backtest(args):
         start=config.BACKTEST_START,
         end=config.BACKTEST_END,
         starting_capital=config.STARTING_CAPITAL,
+        pricing_mode=mode, contract_master=master,
     )
     trades = bt.run()
     equity_curve = bt.get_equity_curve()
@@ -192,6 +201,25 @@ def cmd_backtest(args):
     )
     print(f"\n✅ HTML report: {html_path}")
     print("   Open this file in your browser to view the dashboard.\n")
+
+
+def cmd_intraday(args):
+    import pandas as pd
+    from pathlib import Path
+    from algo_trading.core.contracts import ContractMaster
+    from algo_trading.core.intraday import IntradayBacktester
+    from algo_trading.data.intraday import load_intraday_csv
+    bt = IntradayBacktester(load_intraday_csv(args.bars), load_intraday_csv(args.quotes, quotes=True),
+                           args.ticker, ContractMaster.from_csv(args.contract_master), args.strategy)
+    trades = bt.run()
+    equity = bt.get_equity_curve()
+    output = Path(config.REPORTS_DIR) / "intraday"
+    output.mkdir(parents=True, exist_ok=True)
+    trades_to_dataframe(trades).to_csv(output / "trades.csv", index=False)
+    equity.to_csv(output / "equity.csv")
+    pd.DataFrame(bt.rejections).to_csv(output / "rejections.csv", index=False)
+    print_summary(compute_metrics(trades, equity, bt.starting_capital), args.strategy)
+    print(f"Intraday results: {output.resolve()}")
 
 
 def cmd_signals(args):
@@ -231,28 +259,11 @@ def cmd_optimize(args):
 
     tickers = args.ticker or config.UNDERLYINGS
 
-    # ── Level 1: Grid search ──────────────────────────────────────
-    results_df, best_params = run_optimization(
-        quick=args.quick,
-        tickers=tickers,
-        min_trades=args.min_trades,
-    )
-
-    if results_df.empty:
-        print("\nOptimization produced no valid results. Exiting.")
-        return
-
-    # ── Level 2: Walk-forward (if --top N specified) ──────────────
     if args.top and args.top > 0:
-        n = min(args.top, len(results_df))
-        print(f"\n\nRunning walk-forward validation on top {n} parameter sets...")
-
-        top_params = results_df.head(n).to_dict(orient="records")
-        # Remove 'rank' key before passing to walk_forward
-        for p in top_params:
-            p.pop("rank", None)
-
-        run_walk_forward(top_params, tickers=tickers)
+        run_walk_forward(quick=args.quick, tickers=tickers, top_n=args.top,
+                         min_trades=args.min_trades)
+    else:
+        run_optimization(quick=args.quick, tickers=tickers, min_trades=args.min_trades)
 
 
 def cmd_download_bhavcopy(args):
@@ -378,6 +389,16 @@ def main():
     bt_parser.add_argument("--refresh", action="store_true",
                            help="Force re-download of market data")
 
+    bt_parser.add_argument("--pricing-mode", choices=["research", "strict"], default="research")
+    bt_parser.add_argument("--contract-master", help="Archived contract specifications CSV")
+    bt_parser.add_argument("--fee-schedule", help="Effective-dated fee rates CSV")
+    intraday_parser = sub.add_parser("intraday", help="Replay local timestamped bars and option bid/ask quotes")
+    intraday_parser.add_argument("--bars", required=True)
+    intraday_parser.add_argument("--quotes", required=True)
+    intraday_parser.add_argument("--contract-master", required=True)
+    intraday_parser.add_argument("--ticker", required=True)
+    intraday_parser.add_argument("--strategy", choices=["orb", "vwap"], default="orb")
+
     # signals
     sig_parser = sub.add_parser("signals", help="Generate today's trading signals")
     sig_parser.add_argument("--strategy", default="combined")
@@ -406,7 +427,7 @@ def main():
     )
     opt_parser.add_argument(
         "--top", type=int, default=0, metavar="N",
-        help="After Level 1, run Level 2 walk-forward on the top N param sets (e.g. --top 5)",
+        help="Nested walk-forward: select top N within each training fold; reserve final holdout",
     )
     opt_parser.add_argument(
         "--min-trades", type=int, default=10, dest="min_trades", metavar="N",
@@ -457,6 +478,8 @@ def main():
     args = parser.parse_args()
     if args.command == "backtest":
         cmd_backtest(args)
+    elif args.command == "intraday":
+        cmd_intraday(args)
     elif args.command == "signals":
         cmd_signals(args)
     elif args.command == "fetch":

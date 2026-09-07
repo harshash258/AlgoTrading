@@ -168,7 +168,7 @@ class GapFadeStrategy(BaseStrategy):
                     self._entry_date[underlying]  = None
                     return signals
 
-        expiry = next_expiry(current_date, weekly=self.weekly)
+        expiry = self.resolve_expiry(data, current_date, weekly=self.weekly)
         meta_base = {
             "gap_pct"   : round(gap_pct, 3),
             "prev_close": round(prev_close, 2),

@@ -17,6 +17,7 @@ Environment variables required:
 import os
 import sys
 import logging
+import pandas as pd
 from html import escape
 from datetime import date, timedelta
 
@@ -26,6 +27,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 from algo_trading.data.ingestion import get_combined_dataset
 from algo_trading.core.backtester import _get_chain_lookup
+from algo_trading.data.signal_data import prepare_signal_data, india_today
 
 # ── All strategies ────────────────────────────────────────────────
 from algo_trading.strategies.trend_following import TrendFollowingStrategy
@@ -283,6 +285,11 @@ def _collect_signals(
 
     for strategy_label, strategy in strategies:
         for ticker, df in data.items():
+            if df.empty or df.index.max().date() != today:
+                reason = f"{TICKER_NAMES.get(ticker, ticker)}: current-session spot candle unavailable"
+                if reason not in suppressed:
+                    suppressed.append(reason)
+                continue
             df_copy = df.copy()
             df_copy.attrs["ticker"] = ticker
             vix_series = df_copy.get("VIX", None)
@@ -325,6 +332,8 @@ def _collect_signals(
                     "expiry"        : sig.expiry,
                     "strike"        : sig.strike,
                     "meta"          : sig.meta,
+                    "group_id"      : sig.group_id,
+                    "structure_type": sig.structure_type,
                     "is_short"      : sig.direction == "short",
                 })
 
@@ -349,6 +358,9 @@ def _validate_contract_signal(ticker: str, sig: dict, spot: float, atm: int, tod
     if abs(nearest - requested_strike) > max_distance:
         return f"nearest strike {nearest:g} is beyond max distance {max_distance:g}"
 
+    if sig.get("strike") and nearest != requested_strike:
+        return "exact requested strike is not listed"
+
     if hasattr(lookup, "premium_with_meta"):
         premium, meta = lookup.premium_with_meta(today, expiry, nearest, sig["option_type"], "close")
     else:
@@ -361,9 +373,13 @@ def _validate_contract_signal(ticker: str, sig: dict, spot: float, atm: int, tod
     oi = meta.get("oi")
     min_volume = config.MIN_OPTION_VOLUME.get(ticker, 0)
     min_oi = config.MIN_OPTION_OI.get(ticker, 0)
-    if volume is not None and float(volume) < min_volume:
+    if volume is None or pd.isna(volume):
+        return "volume unavailable"
+    if oi is None or pd.isna(oi):
+        return "OI unavailable"
+    if float(volume) < min_volume:
         return f"volume {float(volume):.0f} below threshold {min_volume}"
-    if oi is not None and float(oi) < min_oi:
+    if float(oi) < min_oi:
         return f"OI {float(oi):.0f} below threshold {min_oi}"
 
     sig["strike"] = nearest
@@ -382,14 +398,32 @@ def _validate_collected_signals(data: dict, collected: dict, today: date) -> tup
     suppressed: list[str] = []
     for ticker, ticker_data in collected.items():
         valid_sigs = []
-        for sig in ticker_data["sigs"]:
-            reason = _validate_contract_signal(ticker, sig, ticker_data["spot"], ticker_data["atm"], today)
-            if reason:
-                suppressed.append(
-                    f"{ticker_data['name']} {sig['strategy_label']} {sig['option_type']}: {reason}"
-                )
+        from algo_trading.core.structures import EXPECTED_LEGS
+        groups = {}
+        for i, sig in enumerate(ticker_data["sigs"]):
+            key = i
+            if sig.get("structure_type", "single") != "single":
+                key = sig.get("group_id") or (sig["strategy_label"], sig.get("expiry"))
+            groups.setdefault(key, []).append(sig)
+        for group in groups.values():
+            structure = group[0].get("structure_type", "single")
+            reasons = []
+            if structure == "short_strangle" and not config.ALLOW_UNCOVERED_SHORTS:
+                reasons.append("uncovered shorts disabled")
+            if structure == "single" and group[0].get("direction") == "short" and not config.ALLOW_UNCOVERED_SHORTS:
+                reasons.append("uncovered shorts disabled")
+            if len(group) != EXPECTED_LEGS.get(structure, -1):
+                reasons.append("incomplete option structure")
+            reasons.extend(filter(None, (_validate_contract_signal(ticker, sig, ticker_data["spot"], ticker_data["atm"], today) for sig in group)))
+            if reasons:
+                if all(reason == "no current bhavcopy chain data for contract validation" for reason in reasons):
+                    message = f"{ticker_data['name']}: same-session option data unavailable; all candidates blocked"
+                else:
+                    message = f"{ticker_data['name']} {group[0]['strategy_label']}: entire structure suppressed: {'; '.join(dict.fromkeys(reasons))}"
+                if message not in suppressed:
+                    suppressed.append(message)
             else:
-                valid_sigs.append(sig)
+                valid_sigs.extend(group)
         if valid_sigs:
             filtered[ticker] = {**ticker_data, "sigs": valid_sigs}
     return filtered, suppressed
@@ -705,7 +739,7 @@ def generate_signal_messages() -> list[str]:
 
     Returns a list of strings — send each one as a separate message.
     """
-    today = date.today()
+    today = india_today()
     start = today - timedelta(days=400)  # enough history for slowest indicators
 
     # ── Weekend check ─────────────────────────────────────────────
@@ -744,8 +778,15 @@ def generate_signal_messages() -> list[str]:
                 f"Options pricing is approximate."
             )
 
+    # Fetch and validate the exact-session option archive before alert validation.
+    preparation = prepare_signal_data(today)
+    for ticker, item in preparation["underlyings"].items():
+        if item["status"] != "ready":
+            warnings.append(f"Option data: {TICKER_NAMES.get(ticker, ticker)} — {item['status']} ({today}).")
+
     # ── Collect all signals ───────────────────────────────────────
     collected, suppressed = _collect_signals(data, today)
+    candidate_legs = sum(len(v["sigs"]) for v in collected.values())
     collected, validation_suppressed = _validate_collected_signals(data, collected, today)
     suppressed.extend(validation_suppressed)
 
@@ -778,12 +819,20 @@ def generate_signal_messages() -> list[str]:
         f"\n\n{'─' * 34}\n"
         f"Execute manually on Groww at market open.\n"
         f"Set GTT stop-loss immediately after entry.\n"
-        f"Contracts validated with bhavcopy premium/OI/volume proxies when available."
+        f"Validation uses same-session EOD premium/OI/volume proxies, not live bid/ask quotes."
     )
 
     # ── No signals case ───────────────────────────────────────────
     if not collected:
-        return [header + "\n\n<i>No signals today across all strategies. Stay out.</i>" + footer]
+        if candidate_legs or suppressed:
+            summary = "Strategy evaluation or candidate validation was blocked. This is not a no-signal market assessment."
+        else:
+            summary = "No strategy entry signals were generated from the available data."
+        unavailable = any(item["status"] != "ready" for item in preparation["underlyings"].values())
+        if unavailable:
+            summary = "Option-data validation unavailable. " + summary
+        action = "Retry after the same-session archive is available." if unavailable else "No entry action is indicated."
+        return [header + "\n\n<b>" + summary + "</b>\nNo executable trade alert was issued.\n" + action]
 
     # ── Format per-ticker blocks ──────────────────────────────────
     ticker_blocks = []
@@ -812,7 +861,7 @@ def generate_signal_message(strategy=None) -> str:
         from algo_trading.strategies.trend_following import TrendFollowingStrategy
         from algo_trading.strategies.rsi_strategy import RSIStrategy
 
-        today = date.today()
+        today = india_today()
         start = today - timedelta(days=400)
 
         if today.weekday() >= 5:
@@ -830,11 +879,14 @@ def generate_signal_message(strategy=None) -> str:
         if not data:
             return "<b>Signal generation failed</b>\nNo market data available."
 
+        prepare_signal_data(today)
         is_inverse = isinstance(strategy, InverseStrategy)
         strategy_label = strategy.name
 
         grouped: dict = {}
         for ticker, df in data.items():
+            if df.empty or df.index.max().date() != today:
+                continue
             df.attrs["ticker"] = ticker
             vix_series = df.get("VIX", None)
             if vix_series is None:
@@ -860,6 +912,8 @@ def generate_signal_message(strategy=None) -> str:
                     "expiry": s.expiry,
                     "strike": s.strike,
                     "meta": s.meta,
+                    "group_id": s.group_id,
+                    "structure_type": s.structure_type,
                     "is_short": s.direction == "short",
                 } for s in entry_sigs],
             }
@@ -881,7 +935,7 @@ def generate_signal_message(strategy=None) -> str:
                 f"• {_html_text(item)}" for item in suppressed[:12]
             )
         if not grouped:
-            return header + "\n\nNo valid executable signals today. Stay out of the market."
+            return header + "\n\nStrategy candidates were blocked by validation. No executable trade alert was issued."
 
         blocks = [_format_ticker_block(t, d) for t, d in grouped.items()]
         body   = "\n\n" + ("\n\n" + "═" * 34 + "\n\n").join(blocks)

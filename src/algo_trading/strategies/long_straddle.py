@@ -106,7 +106,7 @@ class LongStraddleStrategy(BaseStrategy):
 
         in_trade   = self._in_trade.get(underlying, False)
         spot       = float(data["Close"].iloc[-1])
-        expiry     = next_expiry(current_date, weekly=self.weekly)
+        expiry     = self.resolve_expiry(data, current_date, weekly=self.weekly)
         T          = max((expiry - current_date).days / 365.0, 1 / 365)
         sigma      = current_vix / 100.0
         step       = config.STRIKE_STEPS.get(underlying, 50.0)
@@ -131,7 +131,7 @@ class LongStraddleStrategy(BaseStrategy):
         if in_trade and self.time_stop_days > 0:
             entry_dt = self._entry_date.get(underlying)
             if entry_dt and (current_date - entry_dt).days >= self.time_stop_days:
-                group_id = f"{underlying}:{self.name}"
+                group_id = f"{underlying}:{self.name}:{(self._entry_date.get(underlying) or current_date).isoformat()}"
                 for opt_type in ("CE", "PE"):
                     signals.append(Signal(
                         date=current_date, underlying=underlying,
@@ -178,7 +178,7 @@ class LongStraddleStrategy(BaseStrategy):
 
         # ── Exit: IV percentile has risen → take vol expansion profit
         elif in_trade and iv_percentile >= self.iv_exit_pct:
-            group_id = f"{underlying}:{self.name}"
+            group_id = f"{underlying}:{self.name}:{(self._entry_date.get(underlying) or current_date).isoformat()}"
             for opt_type in ("CE", "PE"):
                 signals.append(Signal(
                     date=current_date,
